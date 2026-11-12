@@ -35,13 +35,18 @@ center of pressure (COP), запись сессий. Идёт переписыв
   `settings` (`AppSettings`, кодек, `SettingsRepository`).
 - `transport-desktop/` — COM-порт (jSerialComm) + `probe`; `transport-android/` — RFCOMM (AGP 9.5.1,
   `com.android.kotlin.multiplatform.library`, тесты в `androidHostTest`). Android SDK: `ANDROID_HOME`, `local.properties`.
-- Дальше: `app` (Compose Multiplatform, desktop + Android).
+- `app/` — KMP (jvm + android): весь UI на Compose Multiplatform + `LiveController` (две ноги, сэмплинг с частотой
+  кадра), `Platform`/`DeviceFactory`, файловое хранилище настроек. `app-desktop/` — `main()`;
+  `app-android/` — `com.android.application` (Activity, ViewModel, `SmartSocksApplication`).
 
 ## Команды
 
 - JDK 21 портативный: `~/.jdks/jdk-21*` (user `JAVA_HOME`). Если в shell нет `JAVA_HOME` — выставить на него.
 - `./gradlew check` — всё (ktlint через Spotless + тесты); `./gradlew :core:jvmTest` — тесты ядра;
   `./gradlew spotlessApply` — автоформат.
+- Запуск: `./gradlew :app-desktop:run`; Android — эмулятор `emulator -avd smartsocks`, затем
+  `./gradlew :app-android:installDebug`. Скриншоты UI без окна: `./gradlew :app-desktop:renderScreens`
+  (→ `app-desktop/build/screens/`). Скриншот окна — только `PrintWindow` (не `CopyFromScreen`: снимает чужие окна).
 
 ## Проверка изменений
 

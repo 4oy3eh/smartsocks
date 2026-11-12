@@ -19,3 +19,6 @@ dependencyResolutionManagement {
 include(":core")
 include(":transport-desktop")
 include(":transport-android")
+include(":app")
+include(":app-desktop")
+include(":app-android")

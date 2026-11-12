@@ -176,6 +176,39 @@ class FootProcessorTest {
         processor.cancelCalibration()
         assertNotNull(processor.baseline)
     }
+
+    @Test
+    fun `updateSettings keeps the calibrated baseline and applies new thresholds`() {
+        val processor = FootProcessor(Foot.LEFT, settings = ProcessorSettings(autoZeroSeconds = 0.0))
+        processor.startCalibration(1)
+        processor.process(frame(Foot.LEFT, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0))
+        val baseline = processor.baseline
+        val press = frame(Foot.LEFT, 5.0, 5.0, 5.0, 5.0, 35.0, 35.0, t = 10_000_000)
+        assertTrue(processor.process(press).inContact, "60 µS is above the default 20 µS")
+
+        val strict = ProcessorSettings(contactOnThreshold = 100.0, contactOffThreshold = 80.0, autoZeroSeconds = 0.0)
+        processor.updateSettings(strict)
+        assertEquals(strict, processor.settings)
+        assertEquals(baseline, processor.baseline)
+        val after = processor.process(press)
+        assertFalse(after.inContact, "60 µS is below the new off threshold")
+        assertEquals(BaselineSource.CALIBRATED, after.baselineSource)
+        assertEquals(60.0, after.totalLoad, 1e-6)
+    }
+
+    @Test
+    fun `updateSettings keeps a calibration in progress and can switch auto-zero off`() {
+        val processor = FootProcessor(Foot.LEFT)
+        processor.startCalibration(2)
+        processor.process(frame(Foot.LEFT, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0))
+        processor.updateSettings(ProcessorSettings(autoZeroSeconds = 0.0, copMinCutoffHz = 3.0))
+        assertEquals(0.5, processor.calibrationProgress)
+        processor.process(frame(Foot.LEFT, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, t = 10_000_000))
+        assertNotNull(processor.baseline)
+        processor.setBaseline(null)
+        val state = processor.process(frame(Foot.LEFT, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, t = 20_000_000))
+        assertEquals(BaselineSource.NONE, state.baselineSource)
+    }
 }
 
 class AutoZeroTest {
@@ -264,6 +297,17 @@ class AutoZeroTest {
         for (i in 1..2000) last = p.process(loaded(10_000_000_000L + i * 10_000_000L)) // 20 s standing
         assertEquals(BaselineSource.AUTO, last.baselineSource)
         assertEquals(900.0, last.totalLoad, 1e-6)
+    }
+
+    @Test
+    fun `updateSettings keeps the learned auto-zero baseline, re-capped`() {
+        val p = FootProcessor(Foot.LEFT)
+        walk(p, 0, 5)
+        p.updateSettings(ProcessorSettings(autoZeroMaxMicroSiemens = 3.0, contactOnThreshold = 25.0))
+        val state = p.process(lifted(5_000_000_000L))
+        assertEquals(BaselineSource.AUTO, state.baselineSource)
+        // 8 µS of leakage per sensor, only 3 µS of it is removed now.
+        assertEquals(6 * 5.0, state.totalLoad, 1e-6)
     }
 
     @Test

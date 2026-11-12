@@ -110,6 +110,37 @@ class SimulatedSockTransportTest {
     }
 
     @Test
+    fun `with a clock, bursts cover the elapsed time so overshooting delays keep the rate`() = runTest {
+        // Every delay "overshoots" to 31 ms on this clock, like a 20 ms delay on a coarse Windows timer.
+        var now = 0L
+        val sim = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0), clockNanos = {
+            now += 31_000_000L
+            now
+        })
+        sim.start(SampleRate.HZ_100, MeasurementRange.K64)
+        val packets = sim.collect(2_000) // ~100 bursts
+        // The first burst is one nominal chunk (2 packets), the others cover 31 ms each (3.1 packets); ±1 burst for
+        // the window edge.
+        assertEquals(2.0 + 99 * 3.1, packets.size.toDouble(), 4.0)
+    }
+
+    @Test
+    fun `with a clock, a stall yields a bounded burst and a restart starts afresh`() = runTest {
+        var now = 0L
+        val sim = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0), clockNanos = { now })
+        sim.start(SampleRate.HZ_100, MeasurementRange.K64)
+        now = 0
+        assertEquals(2, sim.collect(30).size, "first burst: one nominal chunk")
+        now = 60_000_000_000L // the reader stalled for a minute
+        assertEquals(20, sim.collect(30).size, "capped at 10 chunks (200 ms)")
+
+        sim.write(SockCommand.Stop.encode())
+        sim.write(SockCommand.Start.encode())
+        now = 120_000_000_000L
+        assertEquals(2, sim.collect(30).size, "START resets the burst clock")
+    }
+
+    @Test
     fun `applies range and records commands`() = runTest {
         val sim = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted))
         sim.start(SampleRate.HZ_50, MeasurementRange.K2)

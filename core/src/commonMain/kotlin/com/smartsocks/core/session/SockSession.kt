@@ -103,6 +103,14 @@ class SockSession(
 
     private val processor = FootProcessor(foot, layout, processorSettings)
 
+    private val _processorSettings = MutableStateFlow(processorSettings)
+
+    /** The processor settings in effect (or about to be, with the next packet); see [updateProcessorSettings]. */
+    val processorSettings: StateFlow<ProcessorSettings> = _processorSettings.asStateFlow()
+
+    /** Set by [updateProcessorSettings], taken by the packet reader (the only one touching [processor]). */
+    private val pendingProcessorSettings = MutableStateFlow<ProcessorSettings?>(null)
+
     private val _connection = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
     val connection: StateFlow<ConnectionState> = _connection.asStateFlow()
 
@@ -191,6 +199,7 @@ class SockSession(
         calibrationRequest.value = null
         _calibrationProgress.value = null
         processor.cancelCalibration()
+        applyPendingProcessorSettings()
         windowPackets = 0
         packetsPerSecond = 0.0
         rateMismatch = false
@@ -299,7 +308,24 @@ class SockSession(
         return true
     }
 
+    /**
+     * Changes contact thresholds, auto-zero or COP smoothing without reconnecting: the baseline (calibrated or
+     * auto-zero) and a calibration in progress are kept, see [FootProcessor.updateSettings]. Takes effect with the
+     * next packet, or when the next [run] starts. May be called from any thread, at any time.
+     */
+    fun updateProcessorSettings(settings: ProcessorSettings) {
+        _processorSettings.value = settings
+        pendingProcessorSettings.value = settings
+    }
+
+    private fun applyPendingProcessorSettings() {
+        if (pendingProcessorSettings.value != null) {
+            pendingProcessorSettings.getAndUpdate { null }?.let(processor::updateSettings)
+        }
+    }
+
     private fun onPacket(packet: RawPacket) {
+        applyPendingProcessorSettings()
         if (calibrationRequest.value != null) {
             calibrationRequest.getAndUpdate { null }?.let {
                 processor.startCalibration(it)

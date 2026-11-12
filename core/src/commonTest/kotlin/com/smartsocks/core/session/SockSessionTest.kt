@@ -216,6 +216,31 @@ class SockSessionTest {
     }
 
     @Test
+    fun `processor settings change live and keep the calibration`() = runTest {
+        val sim = sim(config = SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted).preloadedInsole())
+        val session = session(sim, processorSettings = ProcessorSettings(autoZeroSeconds = 0.0))
+        // Before the first run: applied when it starts.
+        val strict = ProcessorSettings(contactOnThreshold = 1e6, contactOffThreshold = 1e6, autoZeroSeconds = 0.0)
+        session.updateProcessorSettings(strict)
+        assertEquals(strict, session.processorSettings.value)
+        backgroundScope.launch { session.run() }
+        advanceTimeBy(500)
+        assertTrue(session.calibrate(samples = 20))
+        advanceTimeBy(500)
+        sim.mode = SimMode.Standing
+        advanceTimeBy(500)
+        assertFalse(session.latest.value!!.inContact, "a million µS is never reached")
+        assertEquals(BaselineSource.CALIBRATED, session.latest.value!!.baselineSource)
+
+        session.updateProcessorSettings(ProcessorSettings(autoZeroSeconds = 0.0))
+        advanceTimeBy(100)
+        val state = session.latest.value!!
+        assertTrue(state.inContact)
+        assertEquals(BaselineSource.CALIBRATED, state.baselineSource)
+        assertEquals(ConnectionState.Streaming, session.connection.value)
+    }
+
+    @Test
     fun `calibrate outside streaming is refused and leaves nothing pending`() = runTest {
         val sim = sim(config = SimConfig(connectDelayMillis = 0, mode = SimMode.Standing))
         val session = session(sim)

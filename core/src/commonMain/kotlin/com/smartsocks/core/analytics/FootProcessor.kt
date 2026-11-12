@@ -98,17 +98,16 @@ data class ProcessorSettings(
 class FootProcessor(
     val foot: Foot,
     layout: SensorLayout = SensorLayout.Legacy,
-    private val settings: ProcessorSettings = ProcessorSettings(),
+    settings: ProcessorSettings = ProcessorSettings(),
 ) {
+    var settings: ProcessorSettings = settings
+        private set
+
     private val positions = layout.positions(foot)
-    private val filterX = OneEuroFilter(settings.copMinCutoffHz, settings.copBeta)
-    private val filterY = OneEuroFilter(settings.copMinCutoffHz, settings.copBeta)
+    private var filterX = OneEuroFilter(settings.copMinCutoffHz, settings.copBeta)
+    private var filterY = OneEuroFilter(settings.copMinCutoffHz, settings.copBeta)
     private var calibrator: BaselineCalibrator? = null
-    private val rollingMin = if (settings.autoZeroSeconds > 0.0) {
-        RollingMinimum((settings.autoZeroSeconds * 1e9).toLong())
-    } else {
-        null
-    }
+    private var rollingMin = rollingMinimumFor(settings)
     private val conductance = DoubleArray(SENSOR_COUNT)
     private val autoBaseline = DoubleArray(SENSOR_COUNT)
     private var autoLearned = false
@@ -119,6 +118,29 @@ class FootProcessor(
 
     /** 0..1 while calibrating, null otherwise. */
     val calibrationProgress: Double? get() = calibrator?.progress
+
+    /**
+     * Switches to [newSettings] without losing what was learned: an explicit [baseline], a calibration in progress
+     * and the contact state are kept. The auto-zero baseline is kept (re-capped to the new maximum) unless auto-zero
+     * is disabled; a new window length starts a fresh window. New COP smoothing parameters restart the filter.
+     */
+    fun updateSettings(newSettings: ProcessorSettings) {
+        val old = settings
+        if (newSettings == old) return
+        settings = newSettings
+        if (newSettings.copMinCutoffHz != old.copMinCutoffHz || newSettings.copBeta != old.copBeta) {
+            filterX = OneEuroFilter(newSettings.copMinCutoffHz, newSettings.copBeta)
+            filterY = OneEuroFilter(newSettings.copMinCutoffHz, newSettings.copBeta)
+        }
+        if (newSettings.autoZeroSeconds != old.autoZeroSeconds) rollingMin = rollingMinimumFor(newSettings)
+        if (rollingMin == null) {
+            autoLearned = false
+        } else {
+            for (i in 0 until SENSOR_COUNT) {
+                autoBaseline[i] = minOf(autoBaseline[i], newSettings.autoZeroMaxMicroSiemens)
+            }
+        }
+    }
 
     /** Start collecting an unloaded baseline; the foot must be lifted for the next [samples] frames. */
     fun startCalibration(samples: Int) {
@@ -147,6 +169,7 @@ class FootProcessor(
         }
 
         val explicit = baseline
+        val rollingMin = rollingMin
         if (rollingMin != null) {
             for (i in 0 until SENSOR_COUNT) conductance[i] = microSiemens(frame.resistanceOhms[i])
             rollingMin.add(frame.timestampNanos, conductance)
@@ -193,6 +216,12 @@ class FootProcessor(
             baselineSource = source,
         )
     }
+}
+
+private fun rollingMinimumFor(settings: ProcessorSettings): RollingMinimum? = if (settings.autoZeroSeconds > 0.0) {
+    RollingMinimum((settings.autoZeroSeconds * 1e9).toLong())
+} else {
+    null
 }
 
 data class Balance(

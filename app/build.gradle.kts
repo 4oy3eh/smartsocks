@@ -1,0 +1,53 @@
+import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
+import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
+
+plugins {
+    alias(libs.plugins.kotlin.multiplatform)
+    alias(libs.plugins.android.kmp.library)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.compose.multiplatform)
+}
+
+// All UI and state holders. Desktop (`jvm`) and Android apps are thin launchers in :app-desktop and :app-android.
+kotlin {
+    jvmToolchain(21)
+    jvm()
+
+    android {
+        namespace = "com.smartsocks.app.shared"
+        compileSdk = 37
+        minSdk = 26
+    }
+
+    // javaMain: java.io code shared by both targets (settings file store).
+    @OptIn(ExperimentalKotlinGradlePluginApi::class)
+    applyDefaultHierarchyTemplate {
+        common {
+            group("java") {
+                withJvm()
+                withCompilations { it.target.platformType == KotlinPlatformType.androidJvm }
+            }
+        }
+    }
+
+    sourceSets {
+        commonMain.dependencies {
+            api(project(":core"))
+            implementation(libs.compose.runtime)
+            implementation(libs.compose.foundation)
+            implementation(libs.compose.ui)
+            implementation(libs.compose.material3)
+        }
+        commonTest.dependencies {
+            implementation(kotlin("test"))
+            implementation(libs.kotlinx.coroutines.test)
+        }
+        jvmMain.dependencies {
+            implementation(project(":transport-desktop"))
+        }
+        androidMain.dependencies {
+            implementation(project(":transport-android"))
+            implementation(libs.androidx.activity.compose)
+        }
+    }
+}

@@ -54,9 +54,17 @@ class SimulatedLinkException(message: String) : Exception(message)
 
 /**
  * In-memory sock: understands the real command set and streams real 47-byte packets generated from [GaitModel].
- * Time advances only through `delay`, so tests under `runTest` are deterministic and instant.
+ *
+ * Without [clockNanos], time advances only through `delay` (every burst covers exactly [SimConfig.chunkMillis]), so
+ * tests under `runTest` are deterministic and instant. A real app passes a monotonic clock: a burst then covers the
+ * time actually elapsed since the previous one, so the rate stays right when `delay` overshoots (Windows timers tick
+ * at ~15.6 ms, which turns a 20 ms delay into ~31 ms and 100 Hz into ~64 Hz).
  */
-class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = SimConfig()) : SockTransport {
+class SimulatedSockTransport(
+    val foot: Foot,
+    private val config: SimConfig = SimConfig(),
+    private val clockNanos: (() -> Long)? = null,
+) : SockTransport {
     override val displayName = "Simulated ${foot.name.lowercase().replaceFirstChar { it.uppercase() }}"
 
     /** Can be changed live, e.g. switch to [SimMode.Lifted] to calibrate. */
@@ -95,6 +103,10 @@ class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = Sim
     private var pending = ByteArray(0)
     private var pendingPos = 0
     private var disconnectPending = false
+
+    /** Clock reading at the previous burst; [NO_BURST] at the start of a stream. Only used with [clockNanos]. */
+    @Volatile
+    private var lastBurstNanos = NO_BURST
 
     /** Starts a fresh link, also after [close]: idle state, nothing pending, packet counters from zero. */
     override suspend fun open() {
@@ -156,10 +168,17 @@ class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = Sim
     private fun apply(command: SockCommand) {
         commands.update { it + command }
         when (command) {
-            SockCommand.Start -> link.compareAndSet(Link.Idle, Link.Streaming)
+            SockCommand.Start -> {
+                lastBurstNanos = NO_BURST
+                link.compareAndSet(Link.Idle, Link.Streaming)
+            }
+
             SockCommand.Stop -> link.compareAndSet(Link.Streaming, Link.Idle)
+
             SockCommand.ResetTimestamp -> resetRequested = true
+
             is SockCommand.SetSampleRate -> rate = command.rate
+
             is SockCommand.SetRange -> range = command.range
         }
     }
@@ -170,7 +189,7 @@ class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = Sim
             packetIndex = 0
         }
         val hz = rate.hz
-        packetsDue += config.chunkMillis * hz / 1000.0
+        packetsDue += burstMillis() * hz / 1000.0
         val n = packetsDue.toInt()
         packetsDue -= n
 
@@ -200,6 +219,17 @@ class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = Sim
         pendingPos = 0
     }
 
+    /** The stream time this burst covers. */
+    private fun burstMillis(): Double {
+        val clock = clockNanos ?: return config.chunkMillis.toDouble()
+        val now = clock()
+        val last = lastBurstNanos
+        lastBurstNanos = now
+        if (last == NO_BURST) return config.chunkMillis.toDouble()
+        // A stalled reader must not get a flood of packets afterwards: at most a few chunks' worth.
+        return ((now - last) / 1e6).coerceIn(0.0, MAX_BURST_CHUNKS * config.chunkMillis.toDouble())
+    }
+
     private fun nextPacket(tSeconds: Double): ByteArray {
         gait.forces(tSeconds, mode, forces)
         val counts = IntArray(PacketFormat.CHANNELS)
@@ -214,5 +244,10 @@ class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = Sim
         val u1 = random.nextDouble().coerceAtLeast(1e-12)
         val u2 = random.nextDouble()
         return sqrt(-2 * ln(u1)) * cos(2 * PI * u2)
+    }
+
+    private companion object {
+        const val NO_BURST = Long.MIN_VALUE
+        const val MAX_BURST_CHUNKS = 10
     }
 }

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Two insoles, one step ahead of the other. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M36,37 A7,7 0 0 1 50,37 L50,71 A7,7 0 0 1 36,71 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M58,33 A7,7 0 0 1 72,33 L72,67 A7,7 0 0 1 58,67 Z" />
+</vector>

@@ -123,6 +123,33 @@ class SockSessionTest {
         }
     }
 
+    /** Cancellable reads, but the STOP write is slow (400 ms) and the order of events is recorded. */
+    private class SlowStopTransport : SockTransport {
+        override val displayName = "slow stop"
+        val events = mutableListOf<String>()
+        private var streaming = false
+
+        override suspend fun open() = Unit
+
+        override suspend fun read(buffer: ByteArray): Int {
+            streaming = true
+            delay(1_000_000)
+            return -1
+        }
+
+        override suspend fun write(data: ByteArray) {
+            if (streaming && data.contentEquals(SockCommand.Stop.encode())) {
+                events += "stop-begin"
+                delay(400)
+                events += "stop-done"
+            }
+        }
+
+        override suspend fun close() {
+            events += "close"
+        }
+    }
+
     private class CloseHook(private val inner: SockTransport, private val hook: () -> Unit) :
         SockTransport by inner {
         override suspend fun close() {
@@ -287,7 +314,11 @@ class SockSessionTest {
         backgroundScope.launch { session.run() }
         advanceTimeBy(3_000)
         assertTrue(stamps.size > 200)
-        for (i in 1 until stamps.size) assertEquals(10_000_000L, stamps[i] - stamps[i - 1], "gap at $i")
+        // Even, apart from the slow pull towards the lower envelope (a burst's last packet has the least latency).
+        for (i in 1 until stamps.size) {
+            val gap = stamps[i] - stamps[i - 1]
+            assertTrue(gap in 7_500_000L..10_000_000L, "gap $gap at $i")
+        }
     }
 
     @Test
@@ -340,6 +371,22 @@ class SockSessionTest {
         assertEquals(ConnectionState.Disconnected(null), session.connection.value)
         // STOP reached the device before the socket was closed.
         assertContentEquals(SockCommand.Stop.encode(), transport.writes.last())
+    }
+
+    @Test
+    fun `a slow STOP write is not cut off by the watcher closing the socket`() = runTest {
+        val transport = SlowStopTransport()
+        val session = SockSession(
+            Foot.LEFT,
+            transport,
+            clockNanos = { testScheduler.currentTime * 1_000_000 },
+            commandGapMillis = 0,
+        )
+        val job = launch { session.run() }
+        advanceTimeBy(100)
+        assertEquals(ConnectionState.Streaming, session.connection.value)
+        withTimeout(5_000) { job.cancelAndJoin() }
+        assertEquals(listOf("stop-begin", "stop-done", "close"), transport.events)
     }
 
     @Test

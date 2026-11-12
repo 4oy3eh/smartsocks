@@ -142,6 +142,12 @@ class SockSession(
     @Volatile
     private var acceptingCalibration = false
 
+    @Volatile
+    private var cleanupStarted = false
+
+    /** The connection state a run published last; lets a finished run tell whether a newer run has taken over. */
+    private class RunState(var last: ConnectionState)
+
     private var decoder = PacketDecoder(::onPacket)
     private val sampleClock = SampleClock(settings.rate.periodNanos)
     private var windowStartNanos = 0L
@@ -162,15 +168,23 @@ class SockSession(
     suspend fun run() {
         check(running.compareAndSet(false, true)) { "run() is already active on this session" }
         var reason: String? = null
+        val own = RunState(_connection.value)
         try {
-            reason = link()
+            reason = link(own)
         } finally {
             running.value = false
-            _connection.value = ConnectionState.Disconnected(reason)
+            // A new run may already have started: then its state stays.
+            _connection.compareAndSet(own.last, ConnectionState.Disconnected(reason))
         }
     }
 
-    private suspend fun link(): String? {
+    private fun RunState.publish(state: ConnectionState) {
+        last = state
+        _connection.value = state
+    }
+
+    private suspend fun link(own: RunState): String? {
+        cleanupStarted = false
         decoder = PacketDecoder(::onPacket)
         sampleClock.reset()
         acceptingCalibration = false
@@ -196,7 +210,13 @@ class SockSession(
                     awaitCancellation()
                 } finally {
                     withContext(NonCancellable) {
-                        if (withTimeoutOrNull(WATCHER_GRACE_MILLIS) { cleanedUp.await() } == null) {
+                        var done = withTimeoutOrNull(WATCHER_GRACE_MILLIS) { cleanedUp.await() } != null
+                        // The normal cleanup is under way (it may take STOP + close timeouts): do not close the
+                        // socket in the middle of its STOP write.
+                        if (!done && cleanupStarted) {
+                            done = withTimeoutOrNull(2 * CLEANUP_TIMEOUT_MILLIS) { cleanedUp.await() } != null
+                        }
+                        if (!done) {
                             sendStopOnce()
                             ignoringFailures { withTimeoutOrNull(CLEANUP_TIMEOUT_MILLIS) { transport.close() } }
                         }
@@ -204,16 +224,16 @@ class SockSession(
                 }
             }
             try {
-                _connection.value = ConnectionState.Connecting
+                own.publish(ConnectionState.Connecting)
                 transport.open()
 
-                _connection.value = ConnectionState.Configuring
+                own.publish(ConnectionState.Configuring)
                 for (command in SockCommand.startSequence(settings.rate, settings.range)) {
                     transport.write(command.encode())
                     delay(commandGapMillis)
                 }
 
-                _connection.value = ConnectionState.Streaming
+                own.publish(ConnectionState.Streaming)
                 acceptingCalibration = true
                 windowStartNanos = clockNanos()
                 lastPublishNanos = windowStartNanos
@@ -236,6 +256,7 @@ class SockSession(
             } finally {
                 // First, so calibrate() is refused from here on; then drop everything tied to the link.
                 acceptingCalibration = false
+                cleanupStarted = true
                 withContext(NonCancellable) {
                     sendStopOnce()
                     ignoringFailures { withTimeoutOrNull(CLEANUP_TIMEOUT_MILLIS) { transport.close() } }
@@ -270,6 +291,11 @@ class SockSession(
         require(samples > 0)
         if (!acceptingCalibration) return false
         calibrationRequest.value = samples
+        // The run may have ended between the check and the store, after its cleanup cleared the request.
+        if (!acceptingCalibration) {
+            calibrationRequest.compareAndSet(samples, null)
+            return false
+        }
         return true
     }
 

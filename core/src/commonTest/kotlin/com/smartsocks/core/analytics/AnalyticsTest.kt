@@ -184,14 +184,24 @@ class AutoZeroTest {
     private fun loaded(t: Long, microSiemens: Double = 308.0) =
         frame(Foot.LEFT, microSiemens, microSiemens, microSiemens, 8.0, 8.0, 8.0, t = t)
 
+    /** [seconds] of 100 Hz stride-like data: half a second loaded, half lifted. Returns the last state. */
+    private fun walk(p: FootProcessor, startNanos: Long, seconds: Int): FootState {
+        var state: FootState? = null
+        for (i in 0 until seconds * 100) {
+            val t = startNanos + i * 10_000_000L
+            state = p.process(if ((i / 50) % 2 == 0) loaded(t) else lifted(t))
+        }
+        return state!!
+    }
+
     @Test
-    fun `without calibration the rolling minimum is the baseline`() {
+    fun `walking teaches the baseline from the swing phase`() {
         val p = FootProcessor(Foot.LEFT)
-        val first = p.process(lifted(0))
-        assertEquals(BaselineSource.AUTO, first.baselineSource)
-        assertTrue(first.loads.all { it < 1e-9 }, "loads ${first.loads.toList()}")
+        assertEquals(BaselineSource.NONE, p.process(lifted(0)).baselineSource)
+        walk(p, 10_000_000L, 3)
+        val stance = p.process(loaded(3_100_000_000))
+        assertEquals(BaselineSource.AUTO, stance.baselineSource)
         // Stance: 300 uS above the 8 uS leakage on three sensors.
-        val stance = p.process(loaded(1_000_000_000))
         assertEquals(900.0, stance.totalLoad, 1e-6)
         assertTrue(stance.inContact)
     }
@@ -199,46 +209,75 @@ class AutoZeroTest {
     @Test
     fun `baseline follows the leakage and forgets old minima after the window`() {
         val p = FootProcessor(Foot.LEFT, settings = ProcessorSettings(autoZeroSeconds = 4.0))
-        p.process(frame(Foot.LEFT, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, t = 0))
-        // Leakage rises to 8 uS: the old 2 uS minimum is still inside the window ...
-        assertEquals(36.0, p.process(lifted(1_000_000_000)).totalLoad, 1e-6)
-        // ... and gone 5 s later.
-        assertEquals(0.0, p.process(lifted(5_500_000_000)).totalLoad, 1e-6)
+
+        // Strides with 2 uS leakage, then a stride with 8 uS leakage.
+        fun leak(us: Double, t: Long) = frame(Foot.LEFT, us, us, us, us, us, us, t = t)
+        for (i in 0 until 100) {
+            p.process(
+                if ((i / 25) % 2 ==
+                    0
+                ) {
+                    leak(300.0, i * 10_000_000L)
+                } else {
+                    leak(2.0, i * 10_000_000L)
+                },
+            )
+        }
+        p.process(leak(300.0, 1_000_000_000))
+        // The old 2 uS minimum is still inside the window ...
+        assertEquals(36.0, p.process(leak(8.0, 1_010_000_000)).totalLoad, 1e-6)
+        // ... and gone 5 s later (a swing keeps the baseline learning).
+        p.process(leak(300.0, 5_500_000_000))
+        assertEquals(0.0, p.process(leak(8.0, 5_510_000_000)).totalLoad, 1e-6)
     }
 
     @Test
-    fun `standing still longer than the window stays in contact`() {
+    fun `walking removes leakage only up to the cap`() {
         val p = FootProcessor(Foot.LEFT)
-        var last = p.process(frame(Foot.LEFT, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0, t = 0))
-        for (i in 1..2000) { // 20 s at 100 Hz
-            last = p.process(frame(Foot.LEFT, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0, t = i * 10_000_000L))
+        var last: FootState? = null
+        for (i in 0 until 400) { // 100 uS preload when lifted, 400 uS when loaded
+            val us = if ((i / 50) % 2 == 0) 400.0 else 100.0
+            last = p.process(frame(Foot.LEFT, us, us, us, us, us, us, t = i * 10_000_000L))
         }
-        assertTrue(last.inContact)
         val cap = ProcessorSettings().autoZeroMaxMicroSiemens
-        assertTrue(last.loads.all { kotlin.math.abs(it - (300.0 - cap)) < 1e-6 }, "loads ${last.loads.toList()}")
+        assertTrue(last!!.loads.all { abs(it - (100.0 - cap)) < 1e-6 }, "loads ${last.loads.toList()}")
     }
 
     @Test
-    fun `leakage below the cap is zeroed after the window`() {
+    fun `quiet standing keeps loads and COP unchanged`() {
         val p = FootProcessor(Foot.LEFT)
-        var last = p.process(frame(Foot.LEFT, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, t = 0))
-        for (i in 1..1000) { // 10 s
-            last = p.process(frame(Foot.LEFT, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, t = i * 10_000_000L))
-        }
-        assertFalse(last.inContact)
-        assertTrue(last.loads.all { kotlin.math.abs(it) < 1e-6 }, "loads ${last.loads.toList()}")
+        val g = doubleArrayOf(40.0, 40.0, 20.0, 20.0, 300.0, 300.0)
+        val first = p.process(frame(Foot.LEFT, *g, t = 0))
+        var last = first
+        for (i in 1..2000) last = p.process(frame(Foot.LEFT, *g, t = i * 10_000_000L)) // 20 s
+        assertEquals(first.totalLoad, last.totalLoad, 1e-6)
+        for (i in g.indices) assertEquals(g[i], last.loads[i], 1e-6)
+        assertPoint(first.rawCop!!, last.rawCop, 1e-9)
+        assertEquals(BaselineSource.NONE, last.baselineSource)
+    }
+
+    @Test
+    fun `standing after walking keeps the baseline learned while walking`() {
+        val p = FootProcessor(Foot.LEFT)
+        walk(p, 0, 10)
+        var last = p.process(loaded(10_000_000_000L))
+        for (i in 1..2000) last = p.process(loaded(10_000_000_000L + i * 10_000_000L)) // 20 s standing
+        assertEquals(BaselineSource.AUTO, last.baselineSource)
+        assertEquals(900.0, last.totalLoad, 1e-6)
     }
 
     @Test
     fun `explicit calibration overrides auto-zero`() {
         val p = FootProcessor(Foot.LEFT)
-        repeat(10) { p.process(loaded(it * 10_000_000L)) } // auto baseline = the loaded values
-        p.startCalibration(2)
-        p.process(lifted(200_000_000))
-        p.process(lifted(210_000_000))
-        val state = p.process(loaded(220_000_000))
+        walk(p, 0, 3) // auto baseline = the 8 uS leakage
+        val auto = p.process(loaded(3_000_000_000))
+        assertEquals(900.0, auto.totalLoad, 1e-6)
+        // An explicit baseline that differs from the rolling minimum: 50 uS everywhere.
+        p.setBaseline(Baseline(DoubleArray(6) { ohmsFor(50.0) }))
+        val state = p.process(loaded(3_010_000_000))
         assertEquals(BaselineSource.CALIBRATED, state.baselineSource)
-        assertEquals(900.0, state.totalLoad, 1e-6)
+        assertEquals(3 * 258.0, state.totalLoad, 1e-6)
+        assertTrue(abs(state.totalLoad - auto.totalLoad) > 100.0)
     }
 
     @Test

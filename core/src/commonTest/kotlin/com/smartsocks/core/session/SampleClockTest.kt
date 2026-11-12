@@ -15,7 +15,13 @@ class SampleClockTest {
         // 4 packets arrive together every 40 ms.
         for (burst in 0 until 50) repeat(4) { stamps += clock.stamp(1_000_000_000L + burst * 4 * period) }
         assertEquals(1_000_000_000L, stamps.first())
-        for (i in 1 until stamps.size) assertEquals(period, stamps[i] - stamps[i - 1], "gap at $i")
+        // Evenly spaced, apart from the slow pull of the whole timeline towards the lower envelope.
+        for (i in 1 until stamps.size) {
+            val gap = stamps[i] - stamps[i - 1]
+            assertTrue(gap in period * 3 / 4..period, "gap $gap at $i")
+        }
+        val inBurst = stamps.indices.count { it % 4 != 0 && stamps[it] - stamps[it - 1] == period }
+        assertTrue(inBurst > 100, "bursts must not be smeared")
     }
 
     @Test
@@ -31,7 +37,7 @@ class SampleClockTest {
             last = t
         }
         val error = host - t
-        assertTrue(abs(error) < 300_000_000L, "error $error ns (uncorrected it would be 2000 ms)")
+        assertTrue(abs(error) < 100_000_000L, "error $error ns (uncorrected it would be 2000 ms)")
     }
 
     @Test
@@ -47,7 +53,7 @@ class SampleClockTest {
             last = t
         }
         val error = host - t
-        assertTrue(abs(error) < 300_000_000L, "error $error ns")
+        assertTrue(abs(error) < 100_000_000L, "error $error ns")
     }
 
     @Test
@@ -91,7 +97,7 @@ class SampleClockTest {
             last = t
         }
         val error = host - t
-        assertTrue(abs(error) < 1_500_000_000L, "error $error ns (uncorrected it would be 30 s)")
+        assertTrue(abs(error) < 100_000_000L, "error $error ns (uncorrected it would be 30 s)")
     }
 
     @Test
@@ -146,5 +152,47 @@ class SampleClockTest {
             if (i > 1000) maxLead = maxOf(maxLead, t - host)
         }
         assertTrue(maxLead < 100_000_000L, "stamps lead the host by up to $maxLead ns")
+    }
+
+    private fun assertFasterDeviceIsHandled(factor: Double) {
+        val clock = SampleClock(period)
+        val actual = (period / factor).toLong()
+        var host = 0L
+        var last = Long.MIN_VALUE
+        var minStep = Long.MAX_VALUE
+        var maxLateError = 0L
+        val total = 30_000_000_000L / actual
+        for (i in 0 until total) {
+            host += actual
+            val t = clock.stamp(host)
+            if (last != Long.MIN_VALUE) minStep = minOf(minStep, t - last)
+            last = t
+            if (host > 20_000_000_000L) maxLateError = maxOf(maxLateError, abs(host - t))
+        }
+        assertTrue(minStep >= actual / 2, "x$factor: step of $minStep ns, actual period $actual ns")
+        assertTrue(maxLateError < 500_000_000L, "x$factor: stamps off the host by $maxLateError ns after 20 s")
+    }
+
+    @Test
+    fun `device twice as fast as nominal gets sane steps and tracks the host`() = assertFasterDeviceIsHandled(2.0)
+
+    @Test
+    fun `device one and a half times as fast as nominal gets sane steps and tracks the host`() =
+        assertFasterDeviceIsHandled(1.5)
+
+    @Test
+    fun `two clocks with different first packet latency converge`() {
+        val a = SampleClock(period)
+        val b = SampleClock(period)
+        var diff = Long.MAX_VALUE
+        for (i in 0 until 1500) { // 15 s
+            val host = i * period
+            val ta = a.stamp(host)
+            // The first packet of b was 40 ms late (inside the tolerance), the rest are on time.
+            val tb = b.stamp(if (i == 0) host + 40_000_000L else host)
+            diff = abs(ta - tb)
+            if (i == 1000) assertTrue(diff < 20_000_000L, "feet still ${diff / 1_000_000} ms apart after 10 s")
+        }
+        assertTrue(diff < 20_000_000L)
     }
 }

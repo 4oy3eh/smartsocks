@@ -23,7 +23,7 @@ data class CsvMarker(val tMillis: Double, val label: String)
 /** [header] holds the `# key=value` lines (without the marker lines). */
 class RecordedSession(val header: Map<String, String>, val rows: List<CsvRow>, val markers: List<CsvMarker>)
 
-/** Reads what [CsvRecorder] wrote. */
+/** Reads what [CsvRecorder] wrote, in format version 2 and the older version 1 (`calibrated` 1/0 as the baseline). */
 object CsvSessionReader {
     /** @throws IllegalArgumentException on a missing/unsupported format version or a malformed row. */
     fun read(lines: Iterable<String>): RecordedSession {
@@ -31,6 +31,7 @@ object CsvSessionReader {
         val rows = mutableListOf<CsvRow>()
         val markers = mutableListOf<CsvMarker>()
         var sawColumns = false
+        var version = 0
 
         for ((index, raw) in lines.withIndex()) {
             val line = raw.trimEnd('\r')
@@ -46,16 +47,29 @@ object CsvSessionReader {
                 }
 
                 !sawColumns -> {
-                    require(line == CSV_COLUMNS.joinToString(",")) { "Line ${index + 1}: unexpected column header" }
+                    version = checkVersion(header)
+                    val expected = if (version == 1) CSV_COLUMNS_V1 else CSV_COLUMNS
+                    require(line == expected.joinToString(",")) { "Line ${index + 1}: unexpected column header" }
                     sawColumns = true
                 }
 
-                else -> rows += parseRow(line, index)
+                else -> rows += try {
+                    parseRow(line, version)
+                } catch (e: IllegalArgumentException) {
+                    throw IllegalArgumentException("Line ${index + 1}: ${e.message}", e)
+                }
             }
         }
-        val version = header[CSV_FORMAT_KEY]?.toIntOrNull()
-        require(version == CSV_FORMAT_VERSION) { "Unsupported or missing $CSV_FORMAT_KEY version: $version" }
+        checkVersion(header)
         return RecordedSession(header, rows, markers)
+    }
+
+    private fun checkVersion(header: Map<String, String>): Int {
+        val version = header[CSV_FORMAT_KEY]?.toIntOrNull()
+        require(version == 1 || version == CSV_FORMAT_VERSION) {
+            "Unsupported or missing $CSV_FORMAT_KEY version: $version"
+        }
+        return version!!
     }
 
     private fun parseMarker(line: String, index: Int): CsvMarker {
@@ -67,9 +81,9 @@ object CsvSessionReader {
         return CsvMarker(time, label)
     }
 
-    private fun parseRow(line: String, index: Int): CsvRow {
+    private fun parseRow(line: String, version: Int): CsvRow {
         val f = line.split(',')
-        require(f.size == CSV_COLUMNS.size) { "Line ${index + 1}: expected ${CSV_COLUMNS.size} fields, got ${f.size}" }
+        require(f.size == CSV_COLUMNS.size) { "expected ${CSV_COLUMNS.size} fields, got ${f.size}" }
         val loadsAt = 2 + SENSOR_COUNT
         val totalAt = loadsAt + SENSOR_COUNT
         return CsvRow(
@@ -81,7 +95,11 @@ object CsvSessionReader {
             cop = point(f[totalAt + 1], f[totalAt + 2]),
             rawCop = point(f[totalAt + 3], f[totalAt + 4]),
             inContact = f[totalAt + 5] == "1",
-            baseline = BaselineSource.valueOf(f[totalAt + 6].uppercase()),
+            baseline = if (version == 1) {
+                if (f[totalAt + 6] == "1") BaselineSource.CALIBRATED else BaselineSource.NONE
+            } else {
+                BaselineSource.valueOf(f[totalAt + 6].uppercase())
+            },
         )
     }
 

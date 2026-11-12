@@ -86,8 +86,17 @@ class RollingMinimum(windowNanos: Long) {
     private val mins = Array(SENSOR_COUNT) { DoubleArray(BUCKETS) { Double.POSITIVE_INFINITY } }
     private var currentId = Long.MIN_VALUE
 
+    private val totalMins = DoubleArray(BUCKETS) { Double.POSITIVE_INFINITY }
+    private val totalMaxs = DoubleArray(BUCKETS) { Double.NEGATIVE_INFINITY }
+
     /** Minimum per sensor over the window; valid after the first [add]. */
     val values = DoubleArray(SENSOR_COUNT)
+
+    /** Smallest and largest sum over all sensors of a single sample in the window; valid after the first [add]. */
+    var totalMin = 0.0
+        private set
+    var totalMax = 0.0
+        private set
 
     fun add(timestampNanos: Long, microSiemens: DoubleArray) {
         val id = timestampNanos.floorDiv(bucketNanos)
@@ -98,10 +107,24 @@ class RollingMinimum(windowNanos: Long) {
             for (k in 1..steps) {
                 val slot = (currentId + k).mod(BUCKETS.toLong()).toInt()
                 for (i in 0 until SENSOR_COUNT) mins[i][slot] = Double.POSITIVE_INFINITY
+                totalMins[slot] = Double.POSITIVE_INFINITY
+                totalMaxs[slot] = Double.NEGATIVE_INFINITY
             }
             currentId = id
         }
         val slot = currentId.mod(BUCKETS.toLong()).toInt()
+        var sum = 0.0
+        for (i in 0 until SENSOR_COUNT) sum += microSiemens[i]
+        if (sum < totalMins[slot]) totalMins[slot] = sum
+        if (sum > totalMaxs[slot]) totalMaxs[slot] = sum
+        var lo = Double.POSITIVE_INFINITY
+        var hi = Double.NEGATIVE_INFINITY
+        for (b in 0 until BUCKETS) {
+            if (totalMins[b] < lo) lo = totalMins[b]
+            if (totalMaxs[b] > hi) hi = totalMaxs[b]
+        }
+        totalMin = lo
+        totalMax = hi
         for (i in 0 until SENSOR_COUNT) {
             if (microSiemens[i] < mins[i][slot]) mins[i][slot] = microSiemens[i]
             var m = Double.POSITIVE_INFINITY
@@ -112,6 +135,8 @@ class RollingMinimum(windowNanos: Long) {
 
     fun clear() {
         for (row in mins) row.fill(Double.POSITIVE_INFINITY)
+        totalMins.fill(Double.POSITIVE_INFINITY)
+        totalMaxs.fill(Double.NEGATIVE_INFINITY)
         currentId = Long.MIN_VALUE
     }
 

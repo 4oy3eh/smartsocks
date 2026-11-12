@@ -31,7 +31,10 @@ class FootState(
 }
 
 enum class BaselineSource {
-    /** No baseline: raw conductance counts as load (auto-zero disabled and no calibration). */
+    /**
+     * No baseline: raw conductance counts as load (auto-zero disabled, or enabled but it has not seen the foot
+     * lifted yet, and no calibration).
+     */
     NONE,
 
     /** Rolling minimum of the last few seconds, see [ProcessorSettings.autoZeroSeconds]. */
@@ -48,8 +51,14 @@ data class ProcessorSettings(
     val contactOffThreshold: Double = 10.0,
     /**
      * Without an explicit calibration the baseline is the per-sensor minimum conductance over this many seconds
-     * (while walking the swing phase unloads the sensors every stride). 0 disables auto-zero. Caveat: standing
-     * still is safe because the baseline is capped by [autoZeroMaxMicroSiemens].
+     * (while walking the swing phase unloads the sensors every stride). 0 disables auto-zero.
+     *
+     * The baseline is only updated while the window contains a swing-like phase: the smallest total raw
+     * conductance of the window is below [autoZeroSwingFraction] of its largest (foot lifted or heavily unloaded),
+     * judged on the raw signal, independently of the baseline. Standing still keeps the baseline learned so far
+     * (initially none), so quiet standing is never distorted. Consequence: a preloaded insole that is never
+     * lifted stays uncalibrated, [FootState.baselineSource] stays [BaselineSource.NONE] and the UI should ask
+     * for an explicit calibration.
      */
     val autoZeroSeconds: Double = 4.0,
     /**
@@ -58,6 +67,8 @@ data class ProcessorSettings(
      * longer than [autoZeroSeconds] would make the standing load the "baseline" and the foot would read as lifted.
      */
     val autoZeroMaxMicroSiemens: Double = 30.0,
+    /** A window counts as containing a swing when its minimal total conductance is below this share of its maximum. */
+    val autoZeroSwingFraction: Double = 0.3,
     val copMinCutoffHz: Double = 1.5,
     val copBeta: Double = 0.05,
 ) {
@@ -65,6 +76,7 @@ data class ProcessorSettings(
         require(contactOffThreshold <= contactOnThreshold) { "off threshold must not exceed the on threshold" }
         require(autoZeroSeconds >= 0.0)
         require(autoZeroMaxMicroSiemens >= 0.0)
+        require(autoZeroSwingFraction in 0.0..1.0)
     }
 }
 
@@ -85,6 +97,7 @@ class FootProcessor(
     }
     private val conductance = DoubleArray(SENSOR_COUNT)
     private val autoBaseline = DoubleArray(SENSOR_COUNT)
+    private var autoLearned = false
     private var contact = false
 
     var baseline: Baseline? = null
@@ -120,19 +133,22 @@ class FootProcessor(
         }
 
         val explicit = baseline
-        val source = when {
-            explicit != null -> BaselineSource.CALIBRATED
-            rollingMin != null -> BaselineSource.AUTO
-            else -> BaselineSource.NONE
-        }
         if (rollingMin != null) {
             for (i in 0 until SENSOR_COUNT) conductance[i] = microSiemens(frame.resistanceOhms[i])
             rollingMin.add(frame.timestampNanos, conductance)
-            for (i in 0 until SENSOR_COUNT) {
-                autoBaseline[i] = minOf(rollingMin.values[i], settings.autoZeroMaxMicroSiemens)
+            if (rollingMin.totalMin < settings.autoZeroSwingFraction * rollingMin.totalMax) {
+                for (i in 0 until SENSOR_COUNT) {
+                    autoBaseline[i] = minOf(rollingMin.values[i], settings.autoZeroMaxMicroSiemens)
+                }
+                autoLearned = true
             }
         }
-        val reference = explicit?.unloadedMicroSiemens ?: if (rollingMin != null) autoBaseline else null
+        val source = when {
+            explicit != null -> BaselineSource.CALIBRATED
+            autoLearned -> BaselineSource.AUTO
+            else -> BaselineSource.NONE
+        }
+        val reference = explicit?.unloadedMicroSiemens ?: if (autoLearned) autoBaseline else null
         val loads = LoadModel.loadsAbove(frame, reference)
         val total = loads.sum()
         contact = total > 0.0 && total >= if (contact) settings.contactOffThreshold else settings.contactOnThreshold

@@ -30,6 +30,9 @@ internal val CSV_COLUMNS: List<String> = buildList {
     addAll(listOf("total_load", "cop_x", "cop_y", "raw_cop_x", "raw_cop_y", "contact", "baseline"))
 }
 
+/** Version 1 differed only in the last column, `calibrated` (1/0) instead of `baseline`. */
+internal val CSV_COLUMNS_V1: List<String> = CSV_COLUMNS.dropLast(1) + "calibrated"
+
 /**
  * Writes [FootState]s as CSV: `#` header lines, a column line, then one row per sample. Resistance `r1..r6` is in
  * Ohms, loads in µS, time in ms since the first recorded sample. `baseline` is `none`, `auto` or `calibrated`.

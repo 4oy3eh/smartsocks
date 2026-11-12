@@ -183,6 +183,33 @@ class RecordingTest {
     }
 
     @Test
+    fun `reader checks the version before the columns`() {
+        val lines = listOf("# smartsocks-csv=9", "t_ms,something,else")
+        val message = runCatching { CsvSessionReader.read(lines) }.exceptionOrNull()?.message
+        assertTrue(message?.contains("version") == true, "message: $message")
+    }
+
+    @Test
+    fun `reader reads version 1 files`() {
+        val columns = "t_ms,foot,r1,r2,r3,r4,r5,r6,load1,load2,load3,load4,load5,load6,total_load," +
+            "cop_x,cop_y,raw_cop_x,raw_cop_y,contact,calibrated"
+        val row = "5.000,LEFT,1000,1000,1000,1000,1000,1000,1,1,1,1,1,1,6,0.1,0.2,0.1,0.2,1,"
+        val lines = listOf("# smartsocks-csv=1", columns, row + "1", row.replace("5.000", "6.000") + "0")
+        val rows = CsvSessionReader.read(lines).rows
+        assertEquals(listOf(BaselineSource.CALIBRATED, BaselineSource.NONE), rows.map { it.baseline })
+    }
+
+    @Test
+    fun `reader reports the line of a bad enum value`() {
+        val sink = InMemoryRecordingSink()
+        CsvRecorder(sink, metadata).record(state(nanos = 0))
+        val bad = sink.lines.map { if (it.contains(",LEFT,")) it.replace(",LEFT,", ",MIDDLE,") else it }
+        val line = bad.indexOfFirst { it.contains(",MIDDLE,") } + 1
+        val message = runCatching { CsvSessionReader.read(bad) }.exceptionOrNull()?.message
+        assertTrue(message?.startsWith("Line $line") == true, "message: $message")
+    }
+
+    @Test
     fun `records both feet from running sessions and closes on cancel`() = runTest {
         fun session(foot: Foot) = SockSession(
             foot,

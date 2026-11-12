@@ -7,6 +7,8 @@ import com.smartsocks.core.protocol.PacketFormat
 import com.smartsocks.core.protocol.RawPacket
 import com.smartsocks.core.protocol.SampleRate
 import com.smartsocks.core.protocol.SockCommand
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.test.Test
@@ -131,14 +133,63 @@ class SimulatedSockTransportTest {
     }
 
     @Test
-    fun `read returns -1 after close or link drop`() = runTest {
-        val sim = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0, disconnectAfterPackets = 10))
+    fun `read returns -1 after a link drop, after delivering everything before it`() = runTest {
+        // 100 Hz in 20 ms bursts of 2: the drop happens in the middle of the sixth burst.
+        val sim = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0, disconnectAfterPackets = 11))
         sim.start(SampleRate.HZ_100, MeasurementRange.K64)
-        val buffer = ByteArray(1024)
-        var result: Int
-        do {
-            result = sim.read(buffer)
-        } while (result >= 0)
-        assertEquals(-1, sim.read(buffer))
+        val packets = sim.collect(5_000)
+        assertEquals(11, packets.size)
+        assertEquals(-1, sim.read(ByteArray(1024)))
+    }
+
+    @Test
+    fun `close wakes a read that waits before START`() = runTest {
+        val sim = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0))
+        sim.open()
+        var result: Int? = null
+        launch { result = sim.read(ByteArray(64)) }
+        runCurrent()
+        assertNull(result)
+        sim.close()
+        runCurrent()
+        assertEquals(-1, result)
+    }
+
+    @Test
+    fun `can be reopened after close with a fresh link`() = runTest {
+        val sim = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0, disconnectAfterPackets = 20))
+        sim.start(SampleRate.HZ_100, MeasurementRange.K64)
+        assertEquals(20, sim.collect(5_000).size)
+        sim.close()
+        assertEquals(-1, sim.read(ByteArray(64)))
+
+        sim.open()
+        // Idle again: silent until started, and the drop counter starts over.
+        assertNull(withTimeoutOrNull(500) { sim.read(ByteArray(64)) })
+        for (c in SockCommand.startSequence(SampleRate.HZ_100, MeasurementRange.K64)) sim.write(c.encode())
+        assertEquals(20, sim.collect(5_000).size)
+    }
+
+    @Test
+    fun `unloaded sensors sit in range at 128k and above but saturate below`() = runTest {
+        val sim = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted))
+        sim.start(SampleRate.HZ_50, MeasurementRange.K128)
+        val packet = sim.collect(200).first()
+        for (ch in 0 until 6) {
+            val ohms = MeasurementRange.K128.countsToOhms(packet.count(ch))
+            assertTrue(ohms in 70_000.0..128_000.0, "channel $ch: $ohms")
+        }
+        val tight = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted))
+        tight.start(SampleRate.HZ_50, MeasurementRange.K64)
+        assertEquals(PacketFormat.MAX_COUNT, tight.collect(200).first().count(0))
+    }
+
+    @Test
+    fun `random split copes with tiny buffers and an empty one`() = runTest {
+        val sim = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0, randomSplit = true))
+        sim.start(SampleRate.HZ_100, MeasurementRange.K64)
+        assertEquals(0, sim.read(ByteArray(0)))
+        val n = sim.read(ByteArray(1))
+        assertEquals(1, n)
     }
 }

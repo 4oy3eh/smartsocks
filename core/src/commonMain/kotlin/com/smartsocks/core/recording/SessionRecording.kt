@@ -26,7 +26,8 @@ suspend fun SockSession.recordRawTo(recorder: RawPacketRecorder) {
 
 /**
  * Records several sessions (e.g. both feet) into one CSV through a single collector, so [recorder] never sees
- * concurrent calls. Sessions should share a clock base for the interleaved times to be meaningful.
+ * concurrent calls. Create the sessions with the same `clockNanos`
+ * (one host clock for both feet), otherwise the interleaved times are not comparable.
  */
 suspend fun Collection<SockSession>.recordTo(recorder: CsvRecorder) {
     try {

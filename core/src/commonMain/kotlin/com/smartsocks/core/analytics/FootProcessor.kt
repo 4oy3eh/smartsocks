@@ -10,6 +10,7 @@ import com.smartsocks.core.protocol.SENSOR_COUNT
 class FootState(
     val foot: Foot,
     val timestampNanos: Long,
+    /** Raw resistance per sensor. May contain [Double.POSITIVE_INFINITY]: open circuit or over the range. */
     val resistanceOhms: DoubleArray,
     /** Conductance above baseline per sensor, µS (≈ proportional to force). */
     val loads: DoubleArray,
@@ -51,7 +52,13 @@ class FootProcessor(
 
     /** Start collecting an unloaded baseline; the foot must be lifted for the next [samples] frames. */
     fun startCalibration(samples: Int) {
+        require(samples > 0) { "samples must be positive" }
         calibrator = BaselineCalibrator(samples)
+    }
+
+    /** Aborts a calibration in progress; a completed [baseline] is kept. */
+    fun cancelCalibration() {
+        calibrator = null
     }
 
     fun setBaseline(value: Baseline?) {
@@ -108,12 +115,13 @@ data class Balance(
 
 object BalanceCalculator {
     /**
-     * Assumes both insoles have similar sensitivity; per-insole gain calibration with a known weight would make
-     * the left/right split exact.
+     * A foot that is not in contact counts as zero load (its sub-threshold noise must not skew the split); null
+     * when neither foot is in contact. Assumes both insoles have similar sensitivity; per-insole gain calibration
+     * with a known weight would make the left/right split exact.
      */
     fun compute(left: FootState?, right: FootState?, stanceHalfWidth: Double = 1.0): Balance? {
-        val l = left?.totalLoad ?: 0.0
-        val r = right?.totalLoad ?: 0.0
+        val l = if (left?.inContact == true) left.totalLoad else 0.0
+        val r = if (right?.inContact == true) right.totalLoad else 0.0
         val total = l + r
         if (total <= 0.0) return null
 

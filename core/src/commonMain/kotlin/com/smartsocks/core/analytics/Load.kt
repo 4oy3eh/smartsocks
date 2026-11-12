@@ -18,6 +18,10 @@ class Baseline(val unloadedOhms: DoubleArray) {
  * what the legacy app used) cannot spoil the calibration.
  */
 class BaselineCalibrator(private val samplesNeeded: Int = 50) {
+    init {
+        require(samplesNeeded > 0) { "samplesNeeded must be positive" }
+    }
+
     private val samples = Array(SENSOR_COUNT) { DoubleArray(samplesNeeded) }
     private var collected = 0
 
@@ -60,8 +64,11 @@ object LoadModel {
     }
 }
 
-/** Smallest resistance we trust; a zero count would otherwise mean infinite conductance. */
-private const val MIN_OHMS = 1.0
+/**
+ * Smallest resistance we trust: 100 Ω (10 000 µS) is already a hard press on an FSR, so anything lower is a
+ * glitch (a zero count would otherwise mean infinite conductance and yank the COP).
+ */
+internal const val MIN_OHMS = 100.0
 
 internal fun microSiemens(ohms: Double): Double = 1e6 / ohms.coerceAtLeast(MIN_OHMS)
 

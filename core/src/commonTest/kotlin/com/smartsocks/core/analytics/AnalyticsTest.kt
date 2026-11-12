@@ -7,6 +7,7 @@ import com.smartsocks.core.model.SensorLayout
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -36,9 +37,25 @@ class LoadModelTest {
     }
 
     @Test
-    fun `zero resistance does not produce infinity`() {
+    fun `zero resistance is clamped to the 100 ohm floor`() {
         val loads = LoadModel.loads(SensorFrame(Foot.LEFT, 0, DoubleArray(6)), null)
-        assertTrue(loads.all { it.isFinite() })
+        assertTrue(loads.all { it == 1e6 / 100.0 }, "loads were ${loads.toList()}")
+        val glitch = LoadModel.loads(SensorFrame(Foot.LEFT, 0, DoubleArray(6) { 50.0 }), null)
+        assertEquals(loads[0], glitch[0], EPS)
+    }
+
+    @Test
+    fun `open circuit has no load, with or without baseline`() {
+        val open = SensorFrame(Foot.LEFT, 0, DoubleArray(6) { Double.POSITIVE_INFINITY })
+        assertTrue(LoadModel.loads(open, null).all { it == 0.0 })
+        assertTrue(LoadModel.loads(open, Baseline(DoubleArray(6) { ohmsFor(10.0) })).all { it == 0.0 })
+        val calibrator = BaselineCalibrator(3)
+        repeat(3) { calibrator.add(open) }
+        val baseline = calibrator.result()
+        assertTrue(baseline.unloadedOhms.all { it == Double.POSITIVE_INFINITY })
+        assertTrue(LoadModel.loads(open, baseline).all { it == 0.0 })
+        // A finite reading above an open-circuit baseline is all load.
+        assertEquals(10.0, LoadModel.loads(frame(Foot.LEFT, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0), baseline)[0], EPS)
     }
 }
 
@@ -98,6 +115,27 @@ class BaselineCalibratorTest {
         }
         assertEquals(11.0, calibrator.result().unloadedOhms[0])
     }
+
+    @Test
+    fun `median of mixed finite and infinite samples`() {
+        fun median(vararg values: Double): Double {
+            val c = BaselineCalibrator(values.size)
+            for (v in values) c.add(SensorFrame(Foot.LEFT, 0, DoubleArray(6) { v }))
+            return c.result().unloadedOhms[0]
+        }
+        val inf = Double.POSITIVE_INFINITY
+        assertEquals(30.0, median(10.0, 20.0, 30.0, inf, inf))
+        assertEquals(inf, median(10.0, 20.0, inf, inf, inf))
+        val baseline = Baseline(DoubleArray(6) { median(10_000.0, 20_000.0, 30_000.0, inf, inf) })
+        val loads = LoadModel.loads(frame(Foot.LEFT, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0), baseline)
+        assertEquals(100.0 - 1e6 / 30_000.0, loads[0], EPS)
+    }
+
+    @Test
+    fun `sample count must be positive`() {
+        assertFailsWith<IllegalArgumentException> { BaselineCalibrator(0) }
+        assertFailsWith<IllegalArgumentException> { BaselineCalibrator(-3) }
+    }
 }
 
 class FootProcessorTest {
@@ -118,6 +156,24 @@ class FootProcessorTest {
         assertEquals(1.0, heel.shares.sum(), EPS)
         assertEquals(0.5, heel.shares[4], EPS)
         assertPoint(Point(0.0, -0.966), heel.rawCop)
+    }
+
+    @Test
+    fun `startCalibration validates and cancelCalibration keeps the baseline`() {
+        val processor = FootProcessor(Foot.LEFT)
+        assertFailsWith<IllegalArgumentException> { processor.startCalibration(0) }
+        processor.startCalibration(2)
+        processor.process(frame(Foot.LEFT, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0))
+        processor.cancelCalibration()
+        assertNull(processor.calibrationProgress)
+        assertNull(processor.baseline)
+
+        processor.startCalibration(1)
+        processor.process(frame(Foot.LEFT, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0))
+        assertNotNull(processor.baseline)
+        processor.startCalibration(5)
+        processor.cancelCalibration()
+        assertNotNull(processor.baseline)
     }
 }
 
@@ -175,5 +231,17 @@ class BalanceCalculatorTest {
     @Test
     fun `nothing loaded`() {
         assertNull(BalanceCalculator.compute(null, null))
+    }
+
+    @Test
+    fun `a foot in the air counts as zero load however noisy`() {
+        val air = state(Foot.RIGHT, 5.0, null)
+        val left = state(Foot.LEFT, 1.0, null)
+        assertNull(BalanceCalculator.compute(left, air))
+
+        val b = BalanceCalculator.compute(state(Foot.LEFT, 100.0, Point(0.0, 0.0)), air)
+        assertNotNull(b)
+        assertEquals(1.0, b.left, EPS)
+        assertEquals(0.0, b.right, EPS)
     }
 }

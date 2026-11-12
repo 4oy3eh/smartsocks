@@ -18,7 +18,9 @@ class RawPacket(val bytes: ByteArray) {
  * packet that starts with [PacketFormat.START] and ends with [PacketFormat.END] at the expected offset.
  *
  * On a bad end byte it drops the leading byte and resynchronises on the next start byte already buffered, so
- * garbage or a truncated packet costs at most one packet. Not thread-safe: use from a single reader coroutine.
+ * garbage or a truncated packet costs at most one packet. Known limitation: if the bytes `55 F0` happen to appear
+ * at a fixed offset in every packet, the decoder can lock onto that false boundary; only the (still unknown)
+ * checksum in byte 45 could rule that out. Not thread-safe: use from a single reader coroutine.
  */
 class PacketDecoder(private val onPacket: (RawPacket) -> Unit) {
     private val buffer = ByteArray(PacketFormat.SIZE)

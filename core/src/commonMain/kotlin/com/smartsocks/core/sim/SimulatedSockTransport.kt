@@ -11,6 +11,7 @@ import com.smartsocks.core.transport.SockTransport
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlin.concurrent.Volatile
 import kotlin.math.PI
 import kotlin.math.cos
@@ -26,6 +27,10 @@ data class SimConfig(
     val noise: Double = 0.01,
     /** Per-sensor sensitivity spread, ±fraction. */
     val gainSpread: Double = 0.15,
+    /** Unloaded conductance of an FSR, µS (10 µS = 100 kΩ). */
+    val leakMicroSiemens: Double = FsrModel.LEAK_MICROSIEMENS,
+    /** Per-sensor spread of the leakage, ±fraction. Keep it small enough that the unloaded value fits the range. */
+    val leakSpread: Double = 0.2,
     /** Probability per packet of injecting garbage bytes or truncating the packet. */
     val corruptionRate: Double = 0.0,
     /** Bluetooth delivers data in bursts; one burst every [chunkMillis]. */
@@ -61,15 +66,18 @@ class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = Sim
         private set
 
     /** Every command received, for tests and diagnostics. */
-    val receivedCommands: List<SockCommand> get() = commands.toList()
+    val receivedCommands: List<SockCommand> get() = commands.value
 
     private enum class Link { Idle, Streaming, Closed }
 
     private val link = MutableStateFlow(Link.Idle)
-    private val commands = mutableListOf<SockCommand>()
+    private val commands = MutableStateFlow<List<SockCommand>>(emptyList())
     private val commandLine = StringBuilder()
     private val random = Random(config.seed + foot.ordinal)
     private val gains = DoubleArray(SENSOR_COUNT) { 1 + config.gainSpread * (random.nextDouble() * 2 - 1) }
+    private val leaks = DoubleArray(SENSOR_COUNT) {
+        config.leakMicroSiemens * (1 + config.leakSpread * (random.nextDouble() * 2 - 1))
+    }
     private val gait = GaitModel(foot, config.bodyWeightKg, config.cadenceStepsPerMin)
     private val forces = DoubleArray(SENSOR_COUNT)
 
@@ -80,14 +88,25 @@ class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = Sim
     private var packetsDue = 0.0
     private var pending = ByteArray(0)
     private var pendingPos = 0
+    private var disconnectPending = false
 
+    /** Starts a fresh link, also after [close]: idle state, nothing pending, packet counters from zero. */
     override suspend fun open() {
-        check(link.value != Link.Closed) { "Transport closed" }
         delay(config.connectDelayMillis)
         if (config.failToConnect) throw SimulatedLinkException("Simulated connection failure")
+        pending = ByteArray(0)
+        pendingPos = 0
+        disconnectPending = false
+        commandLine.clear()
+        packetIndex = 0
+        totalPackets = 0
+        packetsDue = 0.0
+        resetRequested = false
+        link.value = Link.Idle
     }
 
     override suspend fun read(buffer: ByteArray): Int {
+        if (buffer.isEmpty()) return 0
         while (true) {
             if (link.value == Link.Closed) return -1
             if (pendingPos < pending.size) {
@@ -96,6 +115,11 @@ class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = Sim
                 pending.copyInto(buffer, 0, pendingPos, pendingPos + n)
                 pendingPos += n
                 return n
+            }
+            if (disconnectPending) {
+                // Everything generated before the drop has been delivered.
+                link.value = Link.Closed
+                return -1
             }
             if (link.value != Link.Streaming) {
                 link.first { it != Link.Idle }
@@ -124,7 +148,7 @@ class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = Sim
     }
 
     private fun apply(command: SockCommand) {
-        commands += command
+        commands.update { it + command }
         when (command) {
             SockCommand.Start -> link.compareAndSet(Link.Idle, Link.Streaming)
             SockCommand.Stop -> link.compareAndSet(Link.Streaming, Link.Idle)
@@ -145,11 +169,11 @@ class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = Sim
         packetsDue -= n
 
         val out = ArrayList<Byte>(n * PacketFormat.SIZE + 16)
-        repeat(n) {
+        for (k in 0 until n) {
             val disconnectAt = config.disconnectAfterPackets
             if (disconnectAt != null && totalPackets >= disconnectAt) {
-                link.value = Link.Closed
-                return@repeat
+                disconnectPending = true
+                break
             }
             val packet = nextPacket(packetIndex.toDouble() / hz)
             packetIndex++
@@ -174,7 +198,7 @@ class SimulatedSockTransport(val foot: Foot, private val config: SimConfig = Sim
         gait.forces(tSeconds, mode, forces)
         val counts = IntArray(PacketFormat.CHANNELS)
         for (i in 0 until SENSOR_COUNT) {
-            val ohms = FsrModel.ohms(forces[i], gains[i]) * (1 + config.noise * gaussian())
+            val ohms = FsrModel.ohms(forces[i], gains[i], leaks[i]) * (1 + config.noise * gaussian())
             counts[i] = range.ohmsToCounts(ohms)
         }
         return PacketEncoder.encode(counts)

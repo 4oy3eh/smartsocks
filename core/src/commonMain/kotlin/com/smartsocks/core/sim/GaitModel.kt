@@ -105,11 +105,12 @@ class GaitModel(
     }
 }
 
-/** Force-sensitive resistor: conductance grows linearly with force on top of a small leakage. */
+/** Force-sensitive resistor: conductance grows linearly with force on top of a leakage. */
 object FsrModel {
-    const val LEAK_MICROSIEMENS = 0.5
+    /** Unloaded conductance: 10 µS = 100 kΩ, so an unloaded sensor needs at least the 128 kΩ range. */
+    const val LEAK_MICROSIEMENS = 10.0
     const val MICROSIEMENS_PER_NEWTON = 2.5
 
-    fun ohms(forceN: Double, gain: Double = 1.0): Double =
-        1e6 / (LEAK_MICROSIEMENS + MICROSIEMENS_PER_NEWTON * gain * forceN.coerceAtLeast(0.0))
+    fun ohms(forceN: Double, gain: Double = 1.0, leakMicroSiemens: Double = LEAK_MICROSIEMENS): Double =
+        1e6 / (leakMicroSiemens + MICROSIEMENS_PER_NEWTON * gain * forceN.coerceAtLeast(0.0))
 }

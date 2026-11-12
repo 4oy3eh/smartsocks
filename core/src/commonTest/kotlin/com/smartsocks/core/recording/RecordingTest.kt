@@ -1,0 +1,213 @@
+package com.smartsocks.core.recording
+
+import com.smartsocks.core.analytics.FootState
+import com.smartsocks.core.model.Foot
+import com.smartsocks.core.model.Point
+import com.smartsocks.core.protocol.MeasurementRange
+import com.smartsocks.core.protocol.PacketEncoder
+import com.smartsocks.core.protocol.RawPacket
+import com.smartsocks.core.protocol.SampleRate
+import com.smartsocks.core.session.SockSession
+import com.smartsocks.core.session.StreamSettings
+import com.smartsocks.core.session.TimedPacket
+import com.smartsocks.core.sim.SimConfig
+import com.smartsocks.core.sim.SimMode
+import com.smartsocks.core.sim.SimulatedSockTransport
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class RecordingTest {
+    private val metadata = RecordingMetadata(
+        startTimeIso = "2026-11-12T10:15:30Z",
+        rate = SampleRate.HZ_100,
+        range = MeasurementRange.K64,
+        feet = setOf(Foot.LEFT, Foot.RIGHT),
+        note = "test run",
+    )
+
+    private fun state(
+        foot: Foot = Foot.LEFT,
+        nanos: Long = 0,
+        ohms: DoubleArray = DoubleArray(6) { 1000.0 * (it + 1) },
+        cop: Point? = Point(0.25, -0.5),
+    ) = FootState(
+        foot = foot,
+        timestampNanos = nanos,
+        resistanceOhms = ohms,
+        loads = DoubleArray(6) { 1.5 * (it + 1) },
+        totalLoad = 31.5,
+        shares = DoubleArray(6),
+        cop = cop,
+        rawCop = cop?.let { Point(it.x + 0.01, it.y) },
+        calibrated = true,
+    )
+
+    @Test
+    fun `header describes the recording`() {
+        val sink = InMemoryRecordingSink()
+        CsvRecorder(sink, metadata)
+        assertEquals(
+            listOf(
+                "# smartsocks-csv=1",
+                "# start_time=2026-11-12T10:15:30Z",
+                "# sample_rate_hz=100",
+                "# range=K64",
+                "# feet=LEFT+RIGHT",
+                "# note=test run",
+                "t_ms,foot,r1,r2,r3,r4,r5,r6,load1,load2,load3,load4,load5,load6," +
+                    "total_load,cop_x,cop_y,raw_cop_x,raw_cop_y,contact,calibrated",
+            ),
+            sink.lines,
+        )
+    }
+
+    @Test
+    fun `row is formatted with dot decimals and relative time`() {
+        val sink = InMemoryRecordingSink()
+        val recorder = CsvRecorder(sink, metadata)
+        recorder.record(state(nanos = 5_000_000_000))
+        recorder.record(state(foot = Foot.RIGHT, nanos = 5_012_345_678))
+        assertEquals(
+            "0.000,LEFT,1000.0,2000.0,3000.0,4000.0,5000.0,6000.0,1.500,3.000,4.500,6.000,7.500,9.000,31.500,0.2500,-0.5000,0.2600,-0.5000,1,1",
+            sink.lines[7],
+        )
+        assertTrue(sink.lines[8].startsWith("12.346,RIGHT,"))
+    }
+
+    @Test
+    fun `infinite resistance and missing cop`() {
+        val sink = InMemoryRecordingSink()
+        val recorder = CsvRecorder(sink, metadata)
+        recorder.record(state(ohms = DoubleArray(6) { Double.POSITIVE_INFINITY }, cop = null))
+        val row = sink.lines.last()
+        assertTrue(row.startsWith("0.000,LEFT,inf,inf,inf,inf,inf,inf,"))
+        assertTrue(row.endsWith(",31.500,,,,,0,1"))
+    }
+
+    @Test
+    fun `numbers ignore locale and round half up`() {
+        assertEquals("0.050", formatNumber(0.05, 3))
+        assertEquals("-1.2346", formatNumber(-1.23456, 4))
+        assertEquals("0.0", formatNumber(-0.01, 1))
+        assertEquals("12", formatNumber(11.6, 0))
+        assertEquals("0.001", formatMillis(1_000))
+        assertEquals("1000.000", formatMillis(1_000_000_000))
+    }
+
+    @Test
+    fun `marker is stamped with the last sample time`() {
+        val sink = InMemoryRecordingSink()
+        val recorder = CsvRecorder(sink, metadata)
+        recorder.marker("before")
+        recorder.record(state(nanos = 1_000_000_000))
+        recorder.record(state(nanos = 1_250_000_000))
+        recorder.marker("break one")
+        assertEquals("# marker t_ms=0.000 label=before", sink.lines[7])
+        assertEquals("# marker t_ms=250.000 label=break one", sink.lines.last())
+    }
+
+    @Test
+    fun `raw packet is written as lowercase hex`() {
+        val bytes = PacketEncoder.encode(intArrayOf(0x0102, 0xABCD, 0, 0, 0, 0, 0, 0))
+        val sink = InMemoryRecordingSink()
+        val recorder = RawPacketRecorder(sink)
+        recorder.record(TimedPacket(Foot.RIGHT, 2_000_000_000, RawPacket(bytes)))
+        recorder.record(TimedPacket(Foot.RIGHT, 2_010_000_000, RawPacket(bytes)))
+
+        assertEquals("t_ms,foot,hex", sink.lines[1])
+        val hex = "f0" + "00".repeat(28) + "0201cdab" + "00".repeat(13) + "55"
+        assertEquals(94, hex.length)
+        assertEquals("0.000,RIGHT,$hex", sink.lines[2])
+        assertEquals("10.000,RIGHT,$hex", sink.lines[3])
+    }
+
+    @Test
+    fun `round trip through the reader`() {
+        val sink = InMemoryRecordingSink()
+        val recorder = CsvRecorder(sink, metadata)
+        recorder.record(state(nanos = 100_000_000))
+        recorder.marker("break")
+        recorder.record(
+            state(
+                foot = Foot.RIGHT,
+                nanos = 110_000_000,
+                ohms = DoubleArray(6) {
+                    Double.POSITIVE_INFINITY
+                },
+                cop = null,
+            ),
+        )
+
+        val session = CsvSessionReader.read(sink.lines)
+        assertEquals("1", session.header["smartsocks-csv"])
+        assertEquals("100", session.header["sample_rate_hz"])
+        assertEquals("LEFT+RIGHT", session.header["feet"])
+        assertEquals(listOf(CsvMarker(0.0, "break")), session.markers)
+        assertEquals(2, session.rows.size)
+
+        val a = session.rows[0]
+        assertEquals(Foot.LEFT, a.foot)
+        assertEquals(0.0, a.tMillis)
+        assertEquals(3000.0, a.resistanceOhms[2])
+        assertEquals(4.5, a.loads[2], 1e-9)
+        assertEquals(31.5, a.totalLoad, 1e-9)
+        assertEquals(Point(0.25, -0.5), a.cop)
+        assertEquals(Point(0.26, -0.5), a.rawCop)
+        assertTrue(a.inContact && a.calibrated)
+
+        val b = session.rows[1]
+        assertEquals(Foot.RIGHT, b.foot)
+        assertEquals(10.0, b.tMillis)
+        assertTrue(b.resistanceOhms.all { it == Double.POSITIVE_INFINITY })
+        assertNull(b.cop)
+        assertNull(b.rawCop)
+        assertFalse(b.inContact)
+    }
+
+    @Test
+    fun `reader rejects unknown version`() {
+        val lines = listOf("# smartsocks-csv=2")
+        val error = runCatching { CsvSessionReader.read(lines) }.exceptionOrNull()
+        assertNotNull(error)
+    }
+
+    @Test
+    fun `records both feet from running sessions and closes on cancel`() = runTest {
+        fun session(foot: Foot) = SockSession(
+            foot,
+            SimulatedSockTransport(foot, SimConfig(connectDelayMillis = 0, mode = SimMode.Standing)),
+            StreamSettings(SampleRate.HZ_100, MeasurementRange.K64),
+            clockNanos = { testScheduler.currentTime * 1_000_000 },
+        )
+        val sessions = listOf(session(Foot.LEFT), session(Foot.RIGHT))
+        val csv = InMemoryRecordingSink()
+        val raw = InMemoryRecordingSink()
+        val left = sessions[0]
+
+        val csvJob = launch { sessions.recordTo(CsvRecorder(csv, metadata)) }
+        val rawJob = launch { left.recordRawTo(RawPacketRecorder(raw)) }
+        sessions.forEach { backgroundScope.launch { it.run() } }
+        runCurrent()
+        advanceTimeBy(2_000)
+
+        val rows = CsvSessionReader.read(csv.lines).rows
+        assertEquals(200.0, rows.count { it.foot == Foot.LEFT }.toDouble(), 15.0)
+        assertEquals(200.0, rows.count { it.foot == Foot.RIGHT }.toDouble(), 15.0)
+        assertEquals(200.0, (raw.lines.size - 2).toDouble(), 15.0)
+
+        assertFalse(csv.closed)
+        csvJob.cancel()
+        rawJob.cancel()
+        runCurrent()
+        assertTrue(csv.closed)
+        assertTrue(raw.closed)
+    }
+}

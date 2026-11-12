@@ -54,6 +54,9 @@ data class StreamStats(
     val packetsPerSecond: Double = 0.0,
 )
 
+/** A packet as received, stamped with the same host clock as [FootState.timestampNanos]. */
+class TimedPacket(val foot: Foot, val timestampNanos: Long, val packet: RawPacket)
+
 /**
  * One sock: connects, configures, decodes and processes its stream.
  *
@@ -84,6 +87,14 @@ class SockSession(
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     val states: SharedFlow<FootState> = _states.asSharedFlow()
+
+    private val _rawPackets = MutableSharedFlow<TimedPacket>(
+        extraBufferCapacity = 1024,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /** Every undecoded packet, for raw recording and reverse-engineering the unknown bytes. */
+    val rawPackets: SharedFlow<TimedPacket> = _rawPackets.asSharedFlow()
 
     private val _stats = MutableStateFlow(StreamStats())
     val stats: StateFlow<StreamStats> = _stats.asStateFlow()
@@ -160,6 +171,7 @@ class SockSession(
 
         _latest.value = state
         _states.tryEmit(state)
+        _rawPackets.tryEmit(TimedPacket(foot, now, packet))
         updateStats(now)
     }
 

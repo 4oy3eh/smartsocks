@@ -1,5 +1,6 @@
 package com.smartsocks.core.recording
 
+import com.smartsocks.core.analytics.BaselineSource
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.Point
@@ -47,7 +48,7 @@ class RecordingTest {
         shares = DoubleArray(6),
         cop = cop,
         rawCop = cop?.let { Point(it.x + 0.01, it.y) },
-        calibrated = true,
+        baselineSource = BaselineSource.CALIBRATED,
     )
 
     @Test
@@ -56,14 +57,14 @@ class RecordingTest {
         CsvRecorder(sink, metadata)
         assertEquals(
             listOf(
-                "# smartsocks-csv=1",
+                "# smartsocks-csv=2",
                 "# start_time=2026-11-12T10:15:30Z",
                 "# sample_rate_hz=100",
                 "# range=K64",
                 "# feet=LEFT+RIGHT",
                 "# note=test run",
                 "t_ms,foot,r1,r2,r3,r4,r5,r6,load1,load2,load3,load4,load5,load6," +
-                    "total_load,cop_x,cop_y,raw_cop_x,raw_cop_y,contact,calibrated",
+                    "total_load,cop_x,cop_y,raw_cop_x,raw_cop_y,contact,baseline",
             ),
             sink.lines,
         )
@@ -76,7 +77,7 @@ class RecordingTest {
         recorder.record(state(nanos = 5_000_000_000))
         recorder.record(state(foot = Foot.RIGHT, nanos = 5_012_345_678))
         assertEquals(
-            "0.000,LEFT,1000.0,2000.0,3000.0,4000.0,5000.0,6000.0,1.500,3.000,4.500,6.000,7.500,9.000,31.500,0.2500,-0.5000,0.2600,-0.5000,1,1",
+            "0.000,LEFT,1000.0,2000.0,3000.0,4000.0,5000.0,6000.0,1.500,3.000,4.500,6.000,7.500,9.000,31.500,0.2500,-0.5000,0.2600,-0.5000,1,calibrated",
             sink.lines[7],
         )
         assertTrue(sink.lines[8].startsWith("12.346,RIGHT,"))
@@ -89,7 +90,7 @@ class RecordingTest {
         recorder.record(state(ohms = DoubleArray(6) { Double.POSITIVE_INFINITY }, cop = null))
         val row = sink.lines.last()
         assertTrue(row.startsWith("0.000,LEFT,inf,inf,inf,inf,inf,inf,"))
-        assertTrue(row.endsWith(",31.500,,,,,0,1"))
+        assertTrue(row.endsWith(",31.500,,,,,0,calibrated"))
     }
 
     @Test
@@ -119,14 +120,15 @@ class RecordingTest {
         val bytes = PacketEncoder.encode(intArrayOf(0x0102, 0xABCD, 0, 0, 0, 0, 0, 0))
         val sink = InMemoryRecordingSink()
         val recorder = RawPacketRecorder(sink)
-        recorder.record(TimedPacket(Foot.RIGHT, 2_000_000_000, RawPacket(bytes)))
-        recorder.record(TimedPacket(Foot.RIGHT, 2_010_000_000, RawPacket(bytes)))
+        recorder.record(TimedPacket(Foot.RIGHT, 2_000_000_000, RawPacket(bytes), 2_500_000_000))
+        recorder.record(TimedPacket(Foot.RIGHT, 2_010_000_000, RawPacket(bytes), 2_540_000_000))
 
-        assertEquals("t_ms,foot,hex", sink.lines[1])
+        assertEquals("# smartsocks-raw=2", sink.lines[0])
+        assertEquals("t_ms,host_ms,foot,hex", sink.lines[1])
         val hex = "f0" + "00".repeat(28) + "0201cdab" + "00".repeat(13) + "55"
         assertEquals(94, hex.length)
-        assertEquals("0.000,RIGHT,$hex", sink.lines[2])
-        assertEquals("10.000,RIGHT,$hex", sink.lines[3])
+        assertEquals("0.000,0.000,RIGHT,$hex", sink.lines[2])
+        assertEquals("10.000,40.000,RIGHT,$hex", sink.lines[3])
     }
 
     @Test
@@ -147,7 +149,7 @@ class RecordingTest {
         )
 
         val session = CsvSessionReader.read(sink.lines)
-        assertEquals("1", session.header["smartsocks-csv"])
+        assertEquals("2", session.header["smartsocks-csv"])
         assertEquals("100", session.header["sample_rate_hz"])
         assertEquals("LEFT+RIGHT", session.header["feet"])
         assertEquals(listOf(CsvMarker(0.0, "break")), session.markers)
@@ -161,7 +163,8 @@ class RecordingTest {
         assertEquals(31.5, a.totalLoad, 1e-9)
         assertEquals(Point(0.25, -0.5), a.cop)
         assertEquals(Point(0.26, -0.5), a.rawCop)
-        assertTrue(a.inContact && a.calibrated)
+        assertTrue(a.inContact)
+        assertEquals(BaselineSource.CALIBRATED, a.baseline)
 
         val b = session.rows[1]
         assertEquals(Foot.RIGHT, b.foot)
@@ -174,7 +177,7 @@ class RecordingTest {
 
     @Test
     fun `reader rejects unknown version`() {
-        val lines = listOf("# smartsocks-csv=2")
+        val lines = listOf("# smartsocks-csv=3")
         val error = runCatching { CsvSessionReader.read(lines) }.exceptionOrNull()
         assertNotNull(error)
     }

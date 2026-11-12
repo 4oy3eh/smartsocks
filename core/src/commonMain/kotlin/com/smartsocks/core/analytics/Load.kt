@@ -54,13 +54,69 @@ class BaselineCalibrator(private val samplesNeeded: Int = 50) {
  * which is already close to zero for an unloaded FSR.
  */
 object LoadModel {
-    fun loads(frame: SensorFrame, baseline: Baseline?, out: DoubleArray = DoubleArray(SENSOR_COUNT)): DoubleArray {
+    fun loads(frame: SensorFrame, baseline: Baseline?, out: DoubleArray = DoubleArray(SENSOR_COUNT)): DoubleArray =
+        loadsAbove(frame, baseline?.unloadedMicroSiemens, out)
+
+    /** Same with the baseline given directly as per-sensor conductance in µS (null = zero). */
+    fun loadsAbove(
+        frame: SensorFrame,
+        baselineMicroSiemens: DoubleArray?,
+        out: DoubleArray = DoubleArray(SENSOR_COUNT),
+    ): DoubleArray {
         for (i in 0 until SENSOR_COUNT) {
             val g = microSiemens(frame.resistanceOhms[i])
-            val g0 = baseline?.unloadedMicroSiemens?.get(i) ?: 0.0
+            val g0 = baselineMicroSiemens?.get(i) ?: 0.0
             out[i] = (g - g0).coerceAtLeast(0.0)
         }
         return out
+    }
+}
+
+/**
+ * Per-sensor minimum of conductance over a sliding window (default ~4 s), kept in [BUCKETS] time buckets so memory
+ * is fixed and [add] allocates nothing. Walking lifts the foot every stride, so the minimum is the unloaded value.
+ * Single-threaded; timestamps are expected to be non-decreasing (a step back is treated as "now").
+ */
+class RollingMinimum(windowNanos: Long) {
+    init {
+        require(windowNanos >= BUCKETS) { "window too short" }
+    }
+
+    private val bucketNanos = windowNanos / BUCKETS
+    private val mins = Array(SENSOR_COUNT) { DoubleArray(BUCKETS) { Double.POSITIVE_INFINITY } }
+    private var currentId = Long.MIN_VALUE
+
+    /** Minimum per sensor over the window; valid after the first [add]. */
+    val values = DoubleArray(SENSOR_COUNT)
+
+    fun add(timestampNanos: Long, microSiemens: DoubleArray) {
+        val id = timestampNanos.floorDiv(bucketNanos)
+        if (currentId == Long.MIN_VALUE) {
+            currentId = id
+        } else if (id > currentId) {
+            val steps = minOf(id - currentId, BUCKETS.toLong()).toInt()
+            for (k in 1..steps) {
+                val slot = (currentId + k).mod(BUCKETS.toLong()).toInt()
+                for (i in 0 until SENSOR_COUNT) mins[i][slot] = Double.POSITIVE_INFINITY
+            }
+            currentId = id
+        }
+        val slot = currentId.mod(BUCKETS.toLong()).toInt()
+        for (i in 0 until SENSOR_COUNT) {
+            if (microSiemens[i] < mins[i][slot]) mins[i][slot] = microSiemens[i]
+            var m = Double.POSITIVE_INFINITY
+            for (b in 0 until BUCKETS) if (mins[i][b] < m) m = mins[i][b]
+            values[i] = m
+        }
+    }
+
+    fun clear() {
+        for (row in mins) row.fill(Double.POSITIVE_INFINITY)
+        currentId = Long.MIN_VALUE
+    }
+
+    private companion object {
+        const val BUCKETS = 16
     }
 }
 

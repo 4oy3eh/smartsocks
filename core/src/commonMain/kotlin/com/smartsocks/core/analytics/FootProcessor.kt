@@ -21,17 +21,46 @@ class FootState(
     val cop: Point?,
     /** Unsmoothed COP, for recording. */
     val rawCop: Point?,
-    val calibrated: Boolean,
+    /** Where the baseline that [loads] are measured from came from. */
+    val baselineSource: BaselineSource,
 ) {
     val inContact: Boolean get() = cop != null
+
+    /** An explicit calibration is in effect. */
+    val calibrated: Boolean get() = baselineSource == BaselineSource.CALIBRATED
+}
+
+enum class BaselineSource {
+    /** No baseline: raw conductance counts as load (auto-zero disabled and no calibration). */
+    NONE,
+
+    /** Rolling minimum of the last few seconds, see [ProcessorSettings.autoZeroSeconds]. */
+    AUTO,
+
+    /** Explicit calibration with the foot lifted (or [FootProcessor.setBaseline]); overrides [AUTO]. */
+    CALIBRATED,
 }
 
 data class ProcessorSettings(
-    /** Total load (µS) below which the foot is considered lifted. */
-    val contactThreshold: Double = 20.0,
+    /** Total load (µS over baseline) at or above which a lifted foot is considered to have touched down. */
+    val contactOnThreshold: Double = 20.0,
+    /** Total load below which a foot in contact is considered lifted again. Hysteresis: keep it below the on level. */
+    val contactOffThreshold: Double = 10.0,
+    /**
+     * Without an explicit calibration the baseline is the per-sensor minimum conductance over this many seconds
+     * (while walking the swing phase unloads the sensors every stride). 0 disables auto-zero. Caveat: standing
+     * still for longer than this absorbs the standing load into the baseline until the next step; calibrate for
+     * static measurements.
+     */
+    val autoZeroSeconds: Double = 4.0,
     val copMinCutoffHz: Double = 1.5,
     val copBeta: Double = 0.05,
-)
+) {
+    init {
+        require(contactOffThreshold <= contactOnThreshold) { "off threshold must not exceed the on threshold" }
+        require(autoZeroSeconds >= 0.0)
+    }
+}
 
 /** Turns raw frames of one foot into [FootState]s: baseline, loads, COP, smoothing. Single-threaded. */
 class FootProcessor(
@@ -43,6 +72,13 @@ class FootProcessor(
     private val filterX = OneEuroFilter(settings.copMinCutoffHz, settings.copBeta)
     private val filterY = OneEuroFilter(settings.copMinCutoffHz, settings.copBeta)
     private var calibrator: BaselineCalibrator? = null
+    private val rollingMin = if (settings.autoZeroSeconds > 0.0) {
+        RollingMinimum((settings.autoZeroSeconds * 1e9).toLong())
+    } else {
+        null
+    }
+    private val conductance = DoubleArray(SENSOR_COUNT)
+    private var contact = false
 
     var baseline: Baseline? = null
         private set
@@ -61,6 +97,7 @@ class FootProcessor(
         calibrator = null
     }
 
+    /** Sets (or with null clears) the explicit baseline; without one the auto-zero baseline applies. */
     fun setBaseline(value: Baseline?) {
         baseline = value
         calibrator = null
@@ -75,9 +112,22 @@ class FootProcessor(
             }
         }
 
-        val loads = LoadModel.loads(frame, baseline)
-        val cop = CenterOfPressure.compute(loads, positions, settings.contactThreshold)
+        val explicit = baseline
+        val source = when {
+            explicit != null -> BaselineSource.CALIBRATED
+            rollingMin != null -> BaselineSource.AUTO
+            else -> BaselineSource.NONE
+        }
+        if (rollingMin != null) {
+            for (i in 0 until SENSOR_COUNT) conductance[i] = microSiemens(frame.resistanceOhms[i])
+            rollingMin.add(frame.timestampNanos, conductance)
+        }
+        val reference = explicit?.unloadedMicroSiemens ?: rollingMin?.values
+        val loads = LoadModel.loadsAbove(frame, reference)
         val total = loads.sum()
+        contact = total > 0.0 && total >= if (contact) settings.contactOffThreshold else settings.contactOnThreshold
+        val cop = if (contact) CenterOfPressure.compute(loads, positions, 0.0) else null
+        if (cop == null) contact = false
         val shares = DoubleArray(SENSOR_COUNT) { if (cop != null) loads[it] / total else 0.0 }
 
         val smoothed = if (cop == null) {
@@ -100,7 +150,7 @@ class FootProcessor(
             shares = shares,
             cop = smoothed,
             rawCop = cop?.position,
-            calibrated = baseline != null,
+            baselineSource = source,
         )
     }
 }

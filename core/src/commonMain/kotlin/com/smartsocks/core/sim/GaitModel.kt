@@ -107,8 +107,11 @@ class GaitModel(
 
 /** Force-sensitive resistor: conductance grows linearly with force on top of a leakage. */
 object FsrModel {
-    /** Unloaded conductance: 10 µS = 100 kΩ, so an unloaded sensor needs at least the 128 kΩ range. */
-    const val LEAK_MICROSIEMENS = 10.0
+    /** Unloaded conductance of a clean sensor: 0.7 µS ≈ 1.4 MΩ, out of range for every range (reads as open). */
+    const val LEAK_MICROSIEMENS = 0.7
+
+    /** A leaky insole: 10 µS = 100 kΩ, so an unloaded sensor needs at least the 128 kΩ range. */
+    const val PRELOADED_LEAK_MICROSIEMENS = 10.0
     const val MICROSIEMENS_PER_NEWTON = 2.5
 
     fun ohms(forceN: Double, gain: Double = 1.0, leakMicroSiemens: Double = LEAK_MICROSIEMENS): Double =

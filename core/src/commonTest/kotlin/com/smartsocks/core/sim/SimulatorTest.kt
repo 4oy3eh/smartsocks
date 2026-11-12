@@ -172,14 +172,15 @@ class SimulatedSockTransportTest {
 
     @Test
     fun `unloaded sensors sit in range at 128k and above but saturate below`() = runTest {
-        val sim = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted))
+        val preloaded = SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted).preloadedInsole()
+        val sim = SimulatedSockTransport(Foot.LEFT, preloaded)
         sim.start(SampleRate.HZ_50, MeasurementRange.K128)
         val packet = sim.collect(200).first()
         for (ch in 0 until 6) {
             val ohms = MeasurementRange.K128.countsToOhms(packet.count(ch))
             assertTrue(ohms in 70_000.0..128_000.0, "channel $ch: $ohms")
         }
-        val tight = SimulatedSockTransport(Foot.LEFT, SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted))
+        val tight = SimulatedSockTransport(Foot.LEFT, preloaded)
         tight.start(SampleRate.HZ_50, MeasurementRange.K64)
         assertEquals(PacketFormat.MAX_COUNT, tight.collect(200).first().count(0))
     }
@@ -191,5 +192,15 @@ class SimulatedSockTransportTest {
         assertEquals(0, sim.read(ByteArray(0)))
         val n = sim.read(ByteArray(1))
         assertEquals(1, n)
+    }
+
+    @Test
+    fun `a clean insole reads as open circuit on every range`() = runTest {
+        for (range in MeasurementRange.entries) {
+            val sim = SimulatedSockTransport(Foot.RIGHT, SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted))
+            sim.start(SampleRate.HZ_50, range)
+            val packet = sim.collect(200).first()
+            for (ch in 0 until 6) assertEquals(PacketFormat.MAX_COUNT, packet.count(ch), "$range channel $ch")
+        }
     }
 }

@@ -8,6 +8,7 @@ import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -141,7 +142,7 @@ class BaselineCalibratorTest {
 class FootProcessorTest {
     @Test
     fun `calibration then load gives contact, shares and COP`() {
-        val processor = FootProcessor(Foot.LEFT, settings = ProcessorSettings(contactThreshold = 20.0))
+        val processor = FootProcessor(Foot.LEFT, settings = ProcessorSettings(autoZeroSeconds = 0.0))
         processor.startCalibration(3)
         repeat(3) { processor.process(frame(Foot.LEFT, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0)) }
         assertNotNull(processor.baseline)
@@ -177,6 +178,75 @@ class FootProcessorTest {
     }
 }
 
+class AutoZeroTest {
+    private fun lifted(t: Long) = frame(Foot.LEFT, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, t = t)
+
+    private fun loaded(t: Long, microSiemens: Double = 308.0) =
+        frame(Foot.LEFT, microSiemens, microSiemens, microSiemens, 8.0, 8.0, 8.0, t = t)
+
+    @Test
+    fun `without calibration the rolling minimum is the baseline`() {
+        val p = FootProcessor(Foot.LEFT)
+        val first = p.process(lifted(0))
+        assertEquals(BaselineSource.AUTO, first.baselineSource)
+        assertTrue(first.loads.all { it < 1e-9 }, "loads ${first.loads.toList()}")
+        // Stance: 300 uS above the 8 uS leakage on three sensors.
+        val stance = p.process(loaded(1_000_000_000))
+        assertEquals(900.0, stance.totalLoad, 1e-6)
+        assertTrue(stance.inContact)
+    }
+
+    @Test
+    fun `baseline follows the leakage and forgets old minima after the window`() {
+        val p = FootProcessor(Foot.LEFT, settings = ProcessorSettings(autoZeroSeconds = 4.0))
+        p.process(frame(Foot.LEFT, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, t = 0))
+        // Leakage rises to 8 uS: the old 2 uS minimum is still inside the window ...
+        assertEquals(36.0, p.process(lifted(1_000_000_000)).totalLoad, 1e-6)
+        // ... and gone 5 s later.
+        assertEquals(0.0, p.process(lifted(5_500_000_000)).totalLoad, 1e-6)
+    }
+
+    @Test
+    fun `explicit calibration overrides auto-zero`() {
+        val p = FootProcessor(Foot.LEFT)
+        repeat(10) { p.process(loaded(it * 10_000_000L)) } // auto baseline = the loaded values
+        p.startCalibration(2)
+        p.process(lifted(200_000_000))
+        p.process(lifted(210_000_000))
+        val state = p.process(loaded(220_000_000))
+        assertEquals(BaselineSource.CALIBRATED, state.baselineSource)
+        assertEquals(900.0, state.totalLoad, 1e-6)
+    }
+
+    @Test
+    fun `auto-zero can be disabled`() {
+        val p = FootProcessor(Foot.LEFT, settings = ProcessorSettings(autoZeroSeconds = 0.0))
+        val s = p.process(lifted(0))
+        assertEquals(BaselineSource.NONE, s.baselineSource)
+        assertEquals(48.0, s.totalLoad, 1e-6)
+    }
+
+    @Test
+    fun `contact has hysteresis`() {
+        val p = FootProcessor(Foot.LEFT, settings = ProcessorSettings(autoZeroSeconds = 0.0))
+        fun total(us: Double, t: Long) = p.process(frame(Foot.LEFT, us, 0.0, 0.0, 0.0, 0.0, 0.0, t = t))
+        assertFalse(total(15.0, 0).inContact) // below on
+        assertTrue(total(25.0, 10_000_000).inContact) // above on
+        assertTrue(total(15.0, 20_000_000).inContact) // between off and on: stays
+        assertNotNull(total(15.0, 30_000_000).cop)
+        assertFalse(total(5.0, 40_000_000).inContact) // below off
+        assertNull(total(5.0, 50_000_000).cop)
+        assertFalse(total(15.0, 60_000_000).inContact) // and does not come back below on
+    }
+
+    @Test
+    fun `settings validate the hysteresis band`() {
+        assertFailsWith<IllegalArgumentException> {
+            ProcessorSettings(contactOnThreshold = 5.0, contactOffThreshold = 10.0)
+        }
+    }
+}
+
 class OneEuroFilterTest {
     @Test
     fun `constant signal passes unchanged`() {
@@ -205,7 +275,7 @@ class OneEuroFilterTest {
 
 class BalanceCalculatorTest {
     private fun state(foot: Foot, total: Double, cop: Point?) =
-        FootState(foot, 0, DoubleArray(6), DoubleArray(6), total, DoubleArray(6), cop, cop, true)
+        FootState(foot, 0, DoubleArray(6), DoubleArray(6), total, DoubleArray(6), cop, cop, BaselineSource.CALIBRATED)
 
     @Test
     fun `splits load and weights combined COP`() {

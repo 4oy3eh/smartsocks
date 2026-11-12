@@ -13,6 +13,10 @@ interface SockTransport {
     /** Suspends until at least one byte is available. Returns the number of bytes read, or -1 once closed. */
     suspend fun read(buffer: ByteArray): Int
 
+    /**
+     * May be called while a [read] is pending on another coroutine (cancellation cleanup sends STOP that way when
+     * the read blocks), so implementations must allow concurrent read and write.
+     */
     suspend fun write(data: ByteArray)
 
     /** Idempotent. A pending [read] must return -1. */

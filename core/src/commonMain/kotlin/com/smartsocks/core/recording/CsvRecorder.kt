@@ -18,7 +18,8 @@ data class RecordingMetadata(
 )
 
 internal const val CSV_FORMAT_KEY = "smartsocks-csv"
-internal const val CSV_FORMAT_VERSION = 1
+internal const val CSV_FORMAT_VERSION = 2
+internal const val RAW_FORMAT_VERSION = 2
 internal const val MARKER_PREFIX = "# marker "
 
 internal val CSV_COLUMNS: List<String> = buildList {
@@ -26,12 +27,16 @@ internal val CSV_COLUMNS: List<String> = buildList {
     add("foot")
     for (i in 1..SENSOR_COUNT) add("r$i")
     for (i in 1..SENSOR_COUNT) add("load$i")
-    addAll(listOf("total_load", "cop_x", "cop_y", "raw_cop_x", "raw_cop_y", "contact", "calibrated"))
+    addAll(listOf("total_load", "cop_x", "cop_y", "raw_cop_x", "raw_cop_y", "contact", "baseline"))
 }
 
 /**
  * Writes [FootState]s as CSV: `#` header lines, a column line, then one row per sample. Resistance `r1..r6` is in
- * Ohms, loads in µS, time in ms since the first recorded sample. Not thread-safe: feed it from one coroutine.
+ * Ohms, loads in µS, time in ms since the first recorded sample. `baseline` is `none`, `auto` or `calibrated`.
+ *
+ * Rows are in **arrival order**, not sorted by `t_ms`. With two feet in one file the first recorded sample defines
+ * t = 0, and the other foot's sample clock may be anchored slightly earlier, so `t_ms` can be a little negative.
+ * Not thread-safe: feed it from one coroutine.
  */
 class CsvRecorder(private val sink: RecordingSink, metadata: RecordingMetadata) {
     private var startNanos: Long? = null
@@ -59,7 +64,7 @@ class CsvRecorder(private val sink: RecordingSink, metadata: RecordingMetadata) 
         appendPoint(line, state.cop)
         appendPoint(line, state.rawCop)
         line.append(',').append(if (state.inContact) '1' else '0')
-        line.append(',').append(if (state.calibrated) '1' else '0')
+        line.append(',').append(state.baselineSource.name.lowercase())
         sink.writeLine(line.toString())
     }
 
@@ -80,18 +85,29 @@ class CsvRecorder(private val sink: RecordingSink, metadata: RecordingMetadata) 
     }
 }
 
-/** Writes every packet as `t_ms,foot,hex` (47 bytes, lowercase hex), for decoding the unknown fields offline. */
+/**
+ * Writes every packet as `t_ms,host_ms,foot,hex` (47 bytes, lowercase hex), for decoding the unknown fields
+ * offline. `t_ms` is the sample-clock stamp, `host_ms` the real receive time; both are relative to the first
+ * recorded packet (its stamp and its host time), rows are in arrival order and t_ms may be slightly negative for
+ * the other foot, as in [CsvRecorder].
+ */
 class RawPacketRecorder(private val sink: RecordingSink) {
     private var startNanos: Long? = null
+    private var startHostNanos = 0L
 
     init {
-        sink.writeLine("# smartsocks-raw=1")
-        sink.writeLine("t_ms,foot,hex")
+        sink.writeLine("# smartsocks-raw=$RAW_FORMAT_VERSION")
+        sink.writeLine("t_ms,host_ms,foot,hex")
     }
 
     fun record(timed: TimedPacket) {
-        val start = startNanos ?: timed.timestampNanos.also { startNanos = it }
-        sink.writeLine("${formatMillis(timed.timestampNanos - start)},${timed.foot.name},${timed.packet.bytes.toHex()}")
+        val start = startNanos ?: timed.timestampNanos.also {
+            startNanos = it
+            startHostNanos = timed.hostNanos
+        }
+        val t = formatMillis(timed.timestampNanos - start)
+        val host = formatMillis(timed.hostNanos - startHostNanos)
+        sink.writeLine("$t,$host,${timed.foot.name},${timed.packet.bytes.toHex()}")
     }
 
     fun close() = sink.close()

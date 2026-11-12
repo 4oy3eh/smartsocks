@@ -27,7 +27,10 @@ data class SimConfig(
     val noise: Double = 0.01,
     /** Per-sensor sensitivity spread, ±fraction. */
     val gainSpread: Double = 0.15,
-    /** Unloaded conductance of an FSR, µS (10 µS = 100 kΩ). */
+    /**
+     * Unloaded conductance of an FSR, µS. The default (~0.7 µS ≈ 1.4 MΩ) is a clean FSR: beyond every measurement
+     * range, so it reads as an open circuit with zero load. See [preloadedInsole] for a leaky one.
+     */
     val leakMicroSiemens: Double = FsrModel.LEAK_MICROSIEMENS,
     /** Per-sensor spread of the leakage, ±fraction. Keep it small enough that the unloaded value fits the range. */
     val leakSpread: Double = 0.2,
@@ -43,6 +46,9 @@ data class SimConfig(
     val disconnectAfterPackets: Long? = null,
     val seed: Int = 42,
 )
+
+/** An insole whose sensors conduct ~10 µS (100 kΩ) unloaded, in range from 128 kΩ up: baseline subtraction matters. */
+fun SimConfig.preloadedInsole(): SimConfig = copy(leakMicroSiemens = FsrModel.PRELOADED_LEAK_MICROSIEMENS)
 
 class SimulatedLinkException(message: String) : Exception(message)
 

@@ -17,10 +17,12 @@ import com.smartsocks.core.protocol.SockCommand
 import com.smartsocks.core.transport.SockTransport
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -34,9 +36,12 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.concurrent.Volatile
+import kotlin.math.abs
 import kotlin.time.TimeSource
 
 data class StreamSettings(val rate: SampleRate = SampleRate.HZ_100, val range: MeasurementRange = MeasurementRange.K64)
@@ -57,12 +62,23 @@ sealed interface ConnectionState {
 data class StreamStats(
     val packets: Long = 0,
     val droppedBytes: Long = 0,
-    /** Measured over the last second. */
+    /** Measured over the last full second. */
     val packetsPerSecond: Double = 0.0,
+    /** The rate the session asked the device for; 0 before streaming starts. */
+    val nominalHz: Int = 0,
+    /**
+     * The measured rate deviated from [nominalHz] by more than 10% over the last full second: the firmware ignored
+     * the rate command or packets are being lost. Timestamps stay usable (the clock follows the host) but the UI
+     * should warn.
+     */
+    val rateMismatch: Boolean = false,
 )
 
-/** A packet as received, stamped with the same clock as [FootState.timestampNanos]. */
-class TimedPacket(val foot: Foot, val timestampNanos: Long, val packet: RawPacket)
+/**
+ * A packet as received. [timestampNanos] is the sample-clock stamp (same as [FootState.timestampNanos]),
+ * [hostNanos] the raw receive time on the session's clock, which burst delivery makes much coarser.
+ */
+class TimedPacket(val foot: Foot, val timestampNanos: Long, val packet: RawPacket, val hostNanos: Long)
 
 /**
  * One sock: connects, configures, decodes and processes its stream.
@@ -121,53 +137,69 @@ class SockSession(
 
     private val calibrationRequest = MutableStateFlow<Int?>(null)
     private val running = MutableStateFlow(false)
+    private val stopClaimed = MutableStateFlow(false)
+
+    @Volatile
+    private var acceptingCalibration = false
 
     private var decoder = PacketDecoder(::onPacket)
     private val sampleClock = SampleClock(settings.rate.periodNanos)
     private var windowStartNanos = 0L
     private var windowPackets = 0L
     private var packetsPerSecond = 0.0
+    private var rateMismatch = false
     private var packetsSincePublish = 0
     private var lastPublishNanos = 0L
 
     /**
      * Connects and streams until the link drops or the calling coroutine is cancelled. Never throws except
      * [CancellationException] (and [IllegalStateException] if a run is already active); failures end up in
-     * [connection]. On cancellation the transport is closed by a watcher even if its `read` ignores cancellation
-     * (the read itself must still be suspending, not block the calling thread).
+     * [connection]. [ConnectionState.Disconnected] is published last, after the session accepts a new [run] again,
+     * so a collector may reconnect right from it. On cancellation the transport is closed by a watcher even if its
+     * `read` ignores cancellation (the read itself must still be suspending, not block the calling thread); the
+     * watcher also sends STOP first if the normal cleanup is stuck behind that read.
      */
     suspend fun run() {
         check(running.compareAndSet(false, true)) { "run() is already active on this session" }
+        var reason: String? = null
         try {
-            link()
+            reason = link()
         } finally {
             running.value = false
+            _connection.value = ConnectionState.Disconnected(reason)
         }
     }
 
-    private suspend fun link() {
+    private suspend fun link(): String? {
         decoder = PacketDecoder(::onPacket)
         sampleClock.reset()
+        acceptingCalibration = false
         calibrationRequest.value = null
         _calibrationProgress.value = null
         processor.cancelCalibration()
         windowPackets = 0
         packetsPerSecond = 0.0
+        rateMismatch = false
         packetsSincePublish = 0
+        stopClaimed.value = false
         _stats.value = StreamStats()
 
         var reason: String? = null
         coroutineScope {
             val cleanedUp = CompletableDeferred<Unit>()
             // A blocking read never returns on cancellation, so something else has to close the transport. The
-            // watcher gives the normal cleanup (which sends STOP first) a moment, then closes regardless.
-            val watcher = launch {
+            // watcher gives the normal cleanup a moment, then does it itself: STOP first (write may run
+            // concurrently with the pending read), then close. UNDISPATCHED so that it is armed before anything
+            // below can block or be cancelled.
+            val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
                 try {
                     awaitCancellation()
                 } finally {
                     withContext(NonCancellable) {
-                        withTimeoutOrNull(WATCHER_GRACE_MILLIS) { cleanedUp.await() }
-                        ignoringFailures { withTimeoutOrNull(CLEANUP_TIMEOUT_MILLIS) { transport.close() } }
+                        if (withTimeoutOrNull(WATCHER_GRACE_MILLIS) { cleanedUp.await() } == null) {
+                            sendStopOnce()
+                            ignoringFailures { withTimeoutOrNull(CLEANUP_TIMEOUT_MILLIS) { transport.close() } }
+                        }
                     }
                 }
             }
@@ -182,6 +214,7 @@ class SockSession(
                 }
 
                 _connection.value = ConnectionState.Streaming
+                acceptingCalibration = true
                 windowStartNanos = clockNanos()
                 lastPublishNanos = windowStartNanos
                 val buffer = ByteArray(READ_BUFFER_SIZE)
@@ -197,16 +230,16 @@ class SockSession(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                reason = e.message ?: e::class.simpleName
+                // A blocking open() fails with some "socket closed" once the watcher closes it on cancellation;
+                // that is not a link error.
+                reason = if (currentCoroutineContext().isActive) e.message ?: e::class.simpleName else null
             } finally {
+                // First, so calibrate() is refused from here on; then drop everything tied to the link.
+                acceptingCalibration = false
                 withContext(NonCancellable) {
-                    ignoringFailures {
-                        withTimeoutOrNull(CLEANUP_TIMEOUT_MILLIS) { transport.write(SockCommand.Stop.encode()) }
-                    }
+                    sendStopOnce()
                     ignoringFailures { withTimeoutOrNull(CLEANUP_TIMEOUT_MILLIS) { transport.close() } }
                 }
-                // Disconnected first, so calibrate() is refused from here on; then drop everything tied to the link.
-                _connection.value = ConnectionState.Disconnected(reason)
                 calibrationRequest.value = null
                 processor.cancelCalibration()
                 _calibrationProgress.value = null
@@ -216,24 +249,36 @@ class SockSession(
                 watcher.cancel()
             }
         }
+        return reason
+    }
+
+    private suspend fun sendStopOnce() {
+        if (stopClaimed.compareAndSet(false, true)) {
+            ignoringFailures {
+                withTimeoutOrNull(CLEANUP_TIMEOUT_MILLIS) { transport.write(SockCommand.Stop.encode()) }
+            }
+        }
     }
 
     /**
      * Lift the foot, then call this: the next [samples] frames become the unloaded baseline. Only accepted while
-     * [connection] is [ConnectionState.Streaming]; returns false (and does nothing) otherwise. A calibration cut
-     * short by a link drop is discarded; the previous baseline, if any, is kept.
+     * [connection] is [ConnectionState.Streaming]; returns false (and does nothing) otherwise. The request is only
+     * stored here: the packet reader starts it with the next packet, which is also when [calibrationProgress] first
+     * shows 0.0. A calibration cut short by a link drop is discarded; the previous baseline, if any, is kept.
      */
     fun calibrate(samples: Int = settings.rate.hz): Boolean {
         require(samples > 0)
-        if (_connection.value != ConnectionState.Streaming) return false
+        if (!acceptingCalibration) return false
         calibrationRequest.value = samples
-        _calibrationProgress.value = 0.0
         return true
     }
 
     private fun onPacket(packet: RawPacket) {
         if (calibrationRequest.value != null) {
-            calibrationRequest.getAndUpdate { null }?.let(processor::startCalibration)
+            calibrationRequest.getAndUpdate { null }?.let {
+                processor.startCalibration(it)
+                _calibrationProgress.value = 0.0
+            }
         }
 
         val host = clockNanos()
@@ -244,7 +289,7 @@ class SockSession(
 
         _latest.value = state
         _states.tryEmit(state)
-        _rawPackets.tryEmit(TimedPacket(foot, now, packet))
+        _rawPackets.tryEmit(TimedPacket(foot, now, packet, host))
         updateStats(host)
     }
 
@@ -253,6 +298,8 @@ class SockSession(
         val elapsed = host - windowStartNanos
         if (elapsed >= 1_000_000_000L) {
             packetsPerSecond = windowPackets * 1e9 / elapsed
+            val nominal = settings.rate.hz
+            rateMismatch = abs(packetsPerSecond - nominal) > nominal * RATE_MISMATCH_FRACTION
             windowPackets = 0
             windowStartNanos = host
         }
@@ -265,7 +312,8 @@ class SockSession(
 
     private fun publishStats() {
         packetsSincePublish = 0
-        _stats.value = StreamStats(decoder.packetCount, decoder.droppedBytes, packetsPerSecond)
+        _stats.value =
+            StreamStats(decoder.packetCount, decoder.droppedBytes, packetsPerSecond, settings.rate.hz, rateMismatch)
     }
 
     private suspend inline fun ignoringFailures(block: () -> Unit) {
@@ -282,6 +330,7 @@ class SockSession(
         const val CLEANUP_TIMEOUT_MILLIS = 500L
         const val WATCHER_GRACE_MILLIS = 250L
         const val STATS_EVERY_PACKETS = 10
+        const val RATE_MISMATCH_FRACTION = 0.10
         const val STATS_EVERY_NANOS = 100_000_000L
     }
 }

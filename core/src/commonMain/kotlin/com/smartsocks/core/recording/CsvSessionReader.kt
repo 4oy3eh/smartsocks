@@ -1,5 +1,6 @@
 package com.smartsocks.core.recording
 
+import com.smartsocks.core.analytics.BaselineSource
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.Point
 import com.smartsocks.core.protocol.SENSOR_COUNT
@@ -14,7 +15,7 @@ class CsvRow(
     val cop: Point?,
     val rawCop: Point?,
     val inContact: Boolean,
-    val calibrated: Boolean,
+    val baseline: BaselineSource,
 )
 
 data class CsvMarker(val tMillis: Double, val label: String)
@@ -80,7 +81,7 @@ object CsvSessionReader {
             cop = point(f[totalAt + 1], f[totalAt + 2]),
             rawCop = point(f[totalAt + 3], f[totalAt + 4]),
             inContact = f[totalAt + 5] == "1",
-            calibrated = f[totalAt + 6] == "1",
+            baseline = BaselineSource.valueOf(f[totalAt + 6].uppercase()),
         )
     }
 

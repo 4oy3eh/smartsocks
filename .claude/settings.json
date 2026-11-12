@@ -8,11 +8,34 @@
       "Bash(git show:*)",
       "Bash(gh repo view:*)",
       "Bash(gh pr view:*)",
-      "Bash(gh pr diff:*)"
+      "Bash(gh pr diff:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)",
+      "Bash(./gradlew:*)"
     ],
     "deny": [
       "Edit(legacy/**)",
       "Write(legacy/**)"
     ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/verify.py\"",
+            "timeout": 600,
+            "statusMessage": "Gradle: format + tests"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "kotlin-lsp@claude-plugins-official": true,
+    "commit-commands@claude-plugins-official": true,
+    "claude-md-management@claude-plugins-official": true,
+    "context7@claude-plugins-official": true
   }
 }

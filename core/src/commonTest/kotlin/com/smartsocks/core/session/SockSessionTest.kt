@@ -437,11 +437,9 @@ class SockSessionTest {
 
     @Test
     fun `two feet stream independently and balance adds up`() = runTest {
-        // Auto-zero would absorb a constant standing load; this test is about the split, so use the raw loads.
-        val raw = ProcessorSettings(autoZeroSeconds = 0.0)
         val standing = SimConfig(connectDelayMillis = 0, mode = SimMode.Standing)
-        val left = session(sim(Foot.LEFT, standing), Foot.LEFT, processorSettings = raw)
-        val right = session(sim(Foot.RIGHT, standing), Foot.RIGHT, processorSettings = raw)
+        val left = session(sim(Foot.LEFT, standing), Foot.LEFT)
+        val right = session(sim(Foot.RIGHT, standing), Foot.RIGHT)
         backgroundScope.launch { left.run() }
         backgroundScope.launch { right.run() }
         advanceTimeBy(2_000)

@@ -207,6 +207,29 @@ class AutoZeroTest {
     }
 
     @Test
+    fun `standing still longer than the window stays in contact`() {
+        val p = FootProcessor(Foot.LEFT)
+        var last = p.process(frame(Foot.LEFT, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0, t = 0))
+        for (i in 1..2000) { // 20 s at 100 Hz
+            last = p.process(frame(Foot.LEFT, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0, t = i * 10_000_000L))
+        }
+        assertTrue(last.inContact)
+        val cap = ProcessorSettings().autoZeroMaxMicroSiemens
+        assertTrue(last.loads.all { kotlin.math.abs(it - (300.0 - cap)) < 1e-6 }, "loads ${last.loads.toList()}")
+    }
+
+    @Test
+    fun `leakage below the cap is zeroed after the window`() {
+        val p = FootProcessor(Foot.LEFT)
+        var last = p.process(frame(Foot.LEFT, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, t = 0))
+        for (i in 1..1000) { // 10 s
+            last = p.process(frame(Foot.LEFT, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, t = i * 10_000_000L))
+        }
+        assertFalse(last.inContact)
+        assertTrue(last.loads.all { kotlin.math.abs(it) < 1e-6 }, "loads ${last.loads.toList()}")
+    }
+
+    @Test
     fun `explicit calibration overrides auto-zero`() {
         val p = FootProcessor(Foot.LEFT)
         repeat(10) { p.process(loaded(it * 10_000_000L)) } // auto baseline = the loaded values

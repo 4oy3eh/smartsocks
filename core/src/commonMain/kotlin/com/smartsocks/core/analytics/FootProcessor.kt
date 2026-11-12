@@ -49,16 +49,22 @@ data class ProcessorSettings(
     /**
      * Without an explicit calibration the baseline is the per-sensor minimum conductance over this many seconds
      * (while walking the swing phase unloads the sensors every stride). 0 disables auto-zero. Caveat: standing
-     * still for longer than this absorbs the standing load into the baseline until the next step; calibrate for
-     * static measurements.
+     * still is safe because the baseline is capped by [autoZeroMaxMicroSiemens].
      */
     val autoZeroSeconds: Double = 4.0,
+    /**
+     * Upper bound for what auto-zero may subtract per sensor, in µS. Auto-zero exists to remove leakage and insole
+     * preload (a few µS, at most tens of µS), not body weight (hundreds of µS). Without a cap, standing still for
+     * longer than [autoZeroSeconds] would make the standing load the "baseline" and the foot would read as lifted.
+     */
+    val autoZeroMaxMicroSiemens: Double = 30.0,
     val copMinCutoffHz: Double = 1.5,
     val copBeta: Double = 0.05,
 ) {
     init {
         require(contactOffThreshold <= contactOnThreshold) { "off threshold must not exceed the on threshold" }
         require(autoZeroSeconds >= 0.0)
+        require(autoZeroMaxMicroSiemens >= 0.0)
     }
 }
 
@@ -78,6 +84,7 @@ class FootProcessor(
         null
     }
     private val conductance = DoubleArray(SENSOR_COUNT)
+    private val autoBaseline = DoubleArray(SENSOR_COUNT)
     private var contact = false
 
     var baseline: Baseline? = null
@@ -121,8 +128,11 @@ class FootProcessor(
         if (rollingMin != null) {
             for (i in 0 until SENSOR_COUNT) conductance[i] = microSiemens(frame.resistanceOhms[i])
             rollingMin.add(frame.timestampNanos, conductance)
+            for (i in 0 until SENSOR_COUNT) {
+                autoBaseline[i] = minOf(rollingMin.values[i], settings.autoZeroMaxMicroSiemens)
+            }
         }
-        val reference = explicit?.unloadedMicroSiemens ?: rollingMin?.values
+        val reference = explicit?.unloadedMicroSiemens ?: if (rollingMin != null) autoBaseline else null
         val loads = LoadModel.loadsAbove(frame, reference)
         val total = loads.sum()
         contact = total > 0.0 && total >= if (contact) settings.contactOffThreshold else settings.contactOnThreshold

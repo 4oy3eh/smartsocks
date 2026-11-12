@@ -1,0 +1,30 @@
+# Legacy reference clones (separate repos, archived)
+/legacy/
+
+# Gradle / Kotlin
+.gradle/
+build/
+.kotlin/
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code: personal settings and hook state
+.claude/settings.local.json
+.claude/.state/
+
+# Local tools (portable JDK, ktlint, etc.)
+/tools/
+
+# Session recordings / captures
+*.hprof
+/captures/

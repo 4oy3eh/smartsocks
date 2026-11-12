@@ -376,7 +376,7 @@ fun latestOf(sessions: Collection<SockSession>): Flow<Map<Foot, FootState>> {
     }
 }
 
-private fun monotonicClock(): () -> Long {
+internal fun monotonicClock(): () -> Long {
     val start = TimeSource.Monotonic.markNow()
     return { start.elapsedNow().inWholeNanoseconds }
 }

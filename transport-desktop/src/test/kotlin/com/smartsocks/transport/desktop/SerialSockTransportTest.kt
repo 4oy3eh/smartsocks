@@ -48,7 +48,57 @@ private class FakeHandle(private val openError: Exception? = null) : PortHandle 
 }
 
 class SerialSockTransportTest {
-    private fun transport(handle: FakeHandle) = SerialSockTransport("COM9", handle, Dispatchers.IO)
+    private fun transport(handle: FakeHandle) = SerialSockTransport("COM9", { handle }, Dispatchers.IO)
+
+    @Test
+    fun canBeReopenedAfterCloseWithANewHandle() = runBlocking {
+        val handles = mutableListOf<FakeHandle>()
+        val t = SerialSockTransport("COM9", { FakeHandle().also { handles += it } }, Dispatchers.IO)
+        val buf = ByteArray(16)
+
+        t.open()
+        handles[0].incoming.add(1)
+        assertEquals(1, withTimeout(2000) { t.read(buf) })
+        t.close()
+        assertEquals(-1, t.read(buf))
+
+        t.open()
+        assertEquals(2, handles.size)
+        handles[1].incoming.add(7)
+        assertEquals(1, withTimeout(2000) { t.read(buf) })
+        assertEquals(7.toByte(), buf[0])
+        t.write(byteArrayOf(5))
+        assertContentEquals(byteArrayOf(5), handles[1].written.poll())
+        assertTrue(handles[0].written.isEmpty())
+        t.close()
+        assertEquals(1, handles[0].closeCalls.get())
+        assertEquals(1, handles[1].closeCalls.get())
+    }
+
+    @Test
+    fun openTwiceWithoutCloseFails() = runBlocking {
+        val t = SerialSockTransport("COM9", { FakeHandle() }, Dispatchers.IO)
+        t.open()
+        assertFailsWith<IllegalStateException> { t.open() }
+        t.close()
+        t.open()
+        t.close()
+    }
+
+    @Test
+    fun aFailedOpenCanBeRetried() = runBlocking {
+        var attempts = 0
+        val t = SerialSockTransport(
+            "COM9",
+            { FakeHandle(if (attempts++ == 0) IOException("busy") else null) },
+            Dispatchers.IO,
+        )
+        assertFailsWith<IOException> { t.open() }
+        assertEquals(-1, t.read(ByteArray(4)))
+        t.open()
+        t.close()
+        assertEquals(2, attempts)
+    }
 
     @Test
     fun readReturnsDataThenMinusOneAfterClose() = runBlocking {

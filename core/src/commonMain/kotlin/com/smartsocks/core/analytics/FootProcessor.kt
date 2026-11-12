@@ -6,6 +6,20 @@ import com.smartsocks.core.model.SensorFrame
 import com.smartsocks.core.model.SensorLayout
 import com.smartsocks.core.protocol.SENSOR_COUNT
 
+/**
+ * The part of one foot's sample that [BalanceCalculator] works on. Implemented by the live [FootState] and by
+ * recorded playback samples, so live and replayed balance come from the same code.
+ */
+interface FootLoad {
+    /** Conductance above baseline summed over the sensors, µS. */
+    val totalLoad: Double
+
+    /** Smoothed COP; null when the foot is in the air. */
+    val cop: Point?
+
+    val inContact: Boolean
+}
+
 /** Everything the UI needs to draw one foot at one moment. Immutable snapshot. */
 class FootState(
     val foot: Foot,
@@ -14,17 +28,17 @@ class FootState(
     val resistanceOhms: DoubleArray,
     /** Conductance above baseline per sensor, µS (≈ proportional to force). */
     val loads: DoubleArray,
-    val totalLoad: Double,
+    override val totalLoad: Double,
     /** Share of the foot's total load carried by each sensor, 0..1. All zero when not in contact. */
     val shares: DoubleArray,
     /** Smoothed COP; null when the foot is in the air. */
-    val cop: Point?,
+    override val cop: Point?,
     /** Unsmoothed COP, for recording. */
     val rawCop: Point?,
     /** Where the baseline that [loads] are measured from came from. */
     val baselineSource: BaselineSource,
-) {
-    val inContact: Boolean get() = cop != null
+) : FootLoad {
+    override val inContact: Boolean get() = cop != null
 
     /** An explicit calibration is in effect. */
     val calibrated: Boolean get() = baselineSource == BaselineSource.CALIBRATED
@@ -195,7 +209,7 @@ object BalanceCalculator {
      * when neither foot is in contact. Assumes both insoles have similar sensitivity; per-insole gain calibration
      * with a known weight would make the left/right split exact.
      */
-    fun compute(left: FootState?, right: FootState?, stanceHalfWidth: Double = 1.0): Balance? {
+    fun compute(left: FootLoad?, right: FootLoad?, stanceHalfWidth: Double = 1.0): Balance? {
         val l = if (left?.inContact == true) left.totalLoad else 0.0
         val r = if (right?.inContact == true) right.totalLoad else 0.0
         val total = l + r

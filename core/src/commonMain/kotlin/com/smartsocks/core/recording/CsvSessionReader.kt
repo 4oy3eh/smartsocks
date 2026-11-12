@@ -23,12 +23,29 @@ data class CsvMarker(val tMillis: Double, val label: String)
 /** [header] holds the `# key=value` lines (without the marker lines). */
 class RecordedSession(val header: Map<String, String>, val rows: List<CsvRow>, val markers: List<CsvMarker>)
 
+/** Everything of a recording except its rows, for [CsvSessionReader.stream]. */
+class CsvSessionInfo(val header: Map<String, String>, val markers: List<CsvMarker>)
+
 /** Reads what [CsvRecorder] wrote, in format version 2 and the older version 1 (`calibrated` 1/0 as the baseline). */
 object CsvSessionReader {
-    /** @throws IllegalArgumentException on a missing/unsupported format version or a malformed row. */
+    /**
+     * Keeps every row in memory: fine for short recordings. For long ones use [stream].
+     * @throws IllegalArgumentException on a missing/unsupported format version or a malformed row.
+     */
     fun read(lines: Iterable<String>): RecordedSession {
-        val header = LinkedHashMap<String, String>()
         val rows = mutableListOf<CsvRow>()
+        val info = stream(lines) { rows += it }
+        return RecordedSession(info.header, rows, info.markers)
+    }
+
+    /**
+     * Hands every row to [onRow] as soon as it is parsed, in file order, without keeping it: an hour at 200 Hz is
+     * 1.4 million rows. [lines] are consumed once (e.g. a file's line sequence); blocking I/O, so call it off the
+     * main thread.
+     * @throws IllegalArgumentException as [read]; rows before the bad line have been delivered already.
+     */
+    fun stream(lines: Iterable<String>, onRow: (CsvRow) -> Unit): CsvSessionInfo {
+        val header = LinkedHashMap<String, String>()
         val markers = mutableListOf<CsvMarker>()
         var sawColumns = false
         var version = 0
@@ -53,15 +70,17 @@ object CsvSessionReader {
                     sawColumns = true
                 }
 
-                else -> rows += try {
-                    parseRow(line, version)
-                } catch (e: IllegalArgumentException) {
-                    throw IllegalArgumentException("Line ${index + 1}: ${e.message}", e)
-                }
+                else -> onRow(
+                    try {
+                        parseRow(line, version)
+                    } catch (e: IllegalArgumentException) {
+                        throw IllegalArgumentException("Line ${index + 1}: ${e.message}", e)
+                    },
+                )
             }
         }
         checkVersion(header)
-        return RecordedSession(header, rows, markers)
+        return CsvSessionInfo(header, markers)
     }
 
     private fun checkVersion(header: Map<String, String>): Int {
@@ -77,6 +96,7 @@ object CsvSessionReader {
         require(body.startsWith("t_ms=")) { "Line ${index + 1}: malformed marker" }
         val space = body.indexOf(' ')
         val time = parseNumber(body.substring("t_ms=".length, if (space < 0) body.length else space))
+        require(time.isFinite()) { "Line ${index + 1}: marker time must be finite" }
         val label = if (space < 0) "" else body.substring(space + 1).removePrefix("label=")
         return CsvMarker(time, label)
     }
@@ -86,8 +106,11 @@ object CsvSessionReader {
         require(f.size == CSV_COLUMNS.size) { "expected ${CSV_COLUMNS.size} fields, got ${f.size}" }
         val loadsAt = 2 + SENSOR_COUNT
         val totalAt = loadsAt + SENSOR_COUNT
+        val t = parseNumber(f[0])
+        // inf/nan are valid for resistances (open circuit), never for the time axis.
+        require(t.isFinite()) { "t_ms must be finite, was '${f[0]}'" }
         return CsvRow(
-            tMillis = parseNumber(f[0]),
+            tMillis = t,
             foot = Foot.valueOf(f[1]),
             resistanceOhms = DoubleArray(SENSOR_COUNT) { parseNumber(f[2 + it]) },
             loads = DoubleArray(SENSOR_COUNT) { parseNumber(f[loadsAt + it]) },

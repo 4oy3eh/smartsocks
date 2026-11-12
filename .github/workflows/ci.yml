@@ -19,6 +19,13 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v6
+      # The runner ships an Android SDK (ANDROID_HOME is set) but not necessarily the platform transport-android
+      # compiles against. `yes || true` keeps pipefail from tripping on SIGPIPE.
+      - name: Install Android SDK platform
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          (yes || true) | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" --install "platforms;android-37.0" "build-tools;37.0.0" > /dev/null
       - name: Format, lint and test
         run: ./gradlew spotlessCheck check --console=plain
       - name: Upload test reports

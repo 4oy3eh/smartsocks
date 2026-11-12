@@ -18,3 +18,4 @@ dependencyResolutionManagement {
 
 include(":core")
 include(":transport-desktop")
+include(":transport-android")

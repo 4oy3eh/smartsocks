@@ -136,14 +136,20 @@ class LiveController(
     private val settings: SettingsRepository,
     private val devices: DeviceFactory,
     scope: CoroutineScope,
+    initiallyPaused: Boolean = false,
     private val clockNanos: () -> Long = monotonicNanos(),
 ) {
     private val job = SupervisorJob(scope.coroutineContext[Job])
     private val scope = scope + job
 
-    private val _paused = MutableStateFlow(false)
+    private val _pausedFeet = MutableStateFlow(if (initiallyPaused) Foot.entries.toSet() else emptySet())
 
-    /** See [setPaused]. */
+    /** The feet that are paused, see [setPaused]. */
+    val pausedFeet: StateFlow<Set<Foot>> = _pausedFeet.asStateFlow()
+
+    private val _paused = MutableStateFlow(initiallyPaused)
+
+    /** Both feet are paused, see [setPaused]. */
     val paused: StateFlow<Boolean> = _paused.asStateFlow()
 
     val left = FootLink(Foot.LEFT)
@@ -173,12 +179,18 @@ class LiveController(
 
     /**
      * While paused (the app is in the background) no foot streams: active links are closed, but what the user
-     * asked for is kept, so un-pausing reconnects exactly the feet that were connected (or wanted to be).
-     *
-     * TODO(recording): background recording will need a foreground service that keeps the links up instead.
+     * asked for is kept, so un-pausing reconnects exactly the feet that were connected (or wanted to be). On Android
+     * [com.smartsocks.app.recording.BackgroundRecording] decides it (a recording keeps the links up).
+     * [initiallyPaused]: paused from the start, so nothing connects before the owner un-pauses it.
      */
     fun setPaused(paused: Boolean) {
-        _paused.value = paused
+        setPaused(if (paused) Foot.entries.toSet() else emptySet())
+    }
+
+    /** Pauses exactly [feet] (the others stream as asked), e.g. all but the recorded ones in the background. */
+    fun setPaused(feet: Set<Foot>) {
+        _pausedFeet.value = feet
+        _paused.value = feet.containsAll(Foot.entries)
     }
 
     /**
@@ -265,6 +277,8 @@ class LiveController(
         /** The last explicit calibration and what it is valid for; handed to the next session of the same. */
         @Volatile
         private var carried: CarriedBaseline? = null
+
+        private val pausedHere = _pausedFeet.map { foot in it }.distinctUntilChanged()
 
         /** The foot is meant to be connected (it may still be connecting, or paused). */
         val wantsConnection: Boolean get() = request.value?.connect == true
@@ -498,13 +512,13 @@ class LiveController(
                         combine(
                             session.connection,
                             session.stats.map(LinkRate::of).distinctUntilChanged(),
-                            combine(request, _paused) { req, paused -> req?.connect == true && !paused },
+                            combine(request, pausedHere) { req, paused -> req?.connect == true && !paused },
                             settings.settings.map { it.device(foot) }.distinctUntilChanged(),
                         ) { connection, rate, wanted, shown ->
                             FootStatus(foot, shown, session.displayName, connection.toLinkState(wanted), rate)
                         }.collect { _status.value = it }
                     }
-                    combine(request.filterNotNull(), _paused) { req, paused -> req to paused }
+                    combine(request.filterNotNull(), pausedHere) { req, paused -> req to paused }
                         .collectLatest { (req, paused) ->
                             if (req.connect && !paused) {
                                 // Bluetooth switched off (or the permission revoked) since the session was built.

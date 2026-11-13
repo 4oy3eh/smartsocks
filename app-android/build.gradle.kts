@@ -34,4 +34,6 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel)
+    // Host (JVM) unit tests of the pure Android-side helpers.
+    testImplementation(libs.kotlin.test.junit)
 }

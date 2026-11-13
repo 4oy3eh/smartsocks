@@ -41,8 +41,8 @@ sealed interface OpenState {
 
 /**
  * The sessions list and the open player. Every file access runs on [io]; [scope] is the UI scope (the player is
- * driven from it, see [PlayerController]). Long-lived like the live controller (an Android ViewModel), so an open
- * player survives a rotation.
+ * driven from it, see [PlayerController]). Owned by the screen (Android: its ViewModel), so an open player survives a
+ * rotation; the live controller and the recorder outlive it (Android: the Application object).
  *
  * [activeRecording] is the recording whose files are being written (see
  * [com.smartsocks.app.recording.RecordingController.activeRecording]): it cannot be opened, renamed or deleted

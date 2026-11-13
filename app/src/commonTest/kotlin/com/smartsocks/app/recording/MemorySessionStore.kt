@@ -24,6 +24,9 @@ class MemorySessionStore(var failCreate: Boolean = false, var failWriteAfter: In
 
     var onRead: ((id: String, index: Int) -> Unit)? = null
 
+    /** Called inside [create], before the files exist (e.g. to stop the recording meanwhile). */
+    var onCreate: (() -> Unit)? = null
+
     override val locationText: String = "memory"
 
     private var counter = 0
@@ -48,6 +51,7 @@ class MemorySessionStore(var failCreate: Boolean = false, var failWriteAfter: In
     }
 
     override fun create(saveRaw: Boolean): NewRecording {
+        onCreate?.invoke()
         if (failCreate) throw IllegalStateException("Disk full")
         val id = "rec-${++counter}"
         val csv = InMemoryRecordingSink()

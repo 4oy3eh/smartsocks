@@ -65,8 +65,17 @@ sealed interface RecordingState {
 enum class StopReason {
     User,
 
-    /** The app went to the background (Android): recording does not continue there. */
+    /**
+     * The app went to the background (Android) and the recording could not go on there (no foreground service
+     * allowed), see [BackgroundRecording].
+     */
     Background,
+
+    /**
+     * In the background no recorded foot was connected (the links went down there, or already before the app left
+     * the foreground): nothing reconnects without the UI.
+     */
+    LinksLost,
 
     AppClosed,
 
@@ -263,8 +272,14 @@ class RecordingController(
                 return
             }
             val files = created!!
+            // Stopped while the files were being created: it never shows as running (that would, e.g., start a
+            // foreground service from the background); it only finishes.
             _state.update {
-                if (it == RecordingState.Starting) RecordingState.Recording(files.id, feet, live.nowNanos()) else it
+                if (it == RecordingState.Starting && !queue.isClosedForSend) {
+                    RecordingState.Recording(files.id, feet, live.nowNanos())
+                } else {
+                    it
+                }
             }
             var error: String? = null
             try {

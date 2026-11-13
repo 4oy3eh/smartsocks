@@ -20,9 +20,11 @@ import com.smartsocks.core.settings.SettingsRepository
 import com.smartsocks.core.sim.SimMode
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -140,6 +142,22 @@ class RecordingControllerTest {
         assertEquals(2, summary.markers)
         assertEquals(timeline.durationMillis, summary.durationMillis, 1.0)
         assertEquals(1, f.recorder.finished.value)
+    }
+
+    @Test
+    fun aStopWhileTheFilesAreCreatedNeverShowsAsRecording() = runTest {
+        val f = fixture()
+        advance(1_000)
+        val seen = mutableListOf<RecordingState>()
+        backgroundScope.launch(start = CoroutineStart.UNDISPATCHED) { f.recorder.state.collect { seen += it } }
+        f.store.onCreate = { f.recorder.stop() }
+        assertTrue(f.recorder.start())
+        advance(500)
+        assertEquals(RecordingState.Idle, f.recorder.state.value)
+        assertTrue(seen.none { it is RecordingState.Recording }, "$seen")
+        // Nothing arrived: no recording kept.
+        assertNull(f.recorder.lastResult.value?.id)
+        assertTrue(f.store.entries.isEmpty())
     }
 
     @Test

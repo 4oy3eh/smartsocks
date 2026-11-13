@@ -38,6 +38,9 @@ center of pressure (COP), запись сессий. Идёт переписыв
 - `app/` — KMP (jvm + android): весь UI на Compose Multiplatform + `LiveController` (две ноги, сэмплинг с частотой
   кадра), `Platform`/`DeviceFactory`, файловое хранилище настроек. `app-desktop/` — `main()`;
   `app-android/` — `com.android.application` (Activity, ViewModel, `SmartSocksApplication`).
+- Запись/плеер: `app/.../recording` (`RecordingController`, `SessionStore`, `BackgroundRecording` — политика фона),
+  `app/.../playback` (`SessionsController`, `PlayerController`). На Android `LiveController` и рекордер живут в
+  `SmartSocksApplication` (`LiveServices`), фоновая запись — `RecordingService` (foreground service, wake lock).
 
 ## Команды
 

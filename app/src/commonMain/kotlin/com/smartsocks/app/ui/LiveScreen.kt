@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import com.smartsocks.app.live.FootView
 import com.smartsocks.app.live.LiveController
 import com.smartsocks.app.live.LiveSnapshot
+import com.smartsocks.app.platform.RecordingPrompts
 import com.smartsocks.app.recording.RecordingController
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.settings.ChartSettings
@@ -77,6 +78,7 @@ fun LiveScreen(
     modifier: Modifier = Modifier,
     recorder: RecordingController? = null,
     onOpenRecording: (String) -> Unit = {},
+    recordingPrompts: RecordingPrompts = RecordingPrompts.None,
 ) {
     val snapshot = rememberLiveSnapshot(controller)
     Column(
@@ -88,10 +90,10 @@ fun LiveScreen(
             LiveViewSelector(view, onViewChange, Modifier.weight(1f))
             if (recorder != null) {
                 Spacer(Modifier.width(12.dp))
-                RecordButton(recorder, controller)
+                RecordButton(recorder, controller, recordingPrompts)
             }
         }
-        if (recorder != null) RecordingStrip(recorder, controller, compact, onOpenRecording)
+        if (recorder != null) RecordingStrip(recorder, controller, compact, onOpenRecording, recordingPrompts)
         Box(
             Modifier.weight(1f).fillMaxWidth().padding(vertical = if (compact) 8.dp else 16.dp),
             contentAlignment = Alignment.Center,

@@ -47,6 +47,7 @@ import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveController
 import com.smartsocks.app.platform.DeviceActions
 import com.smartsocks.app.platform.DeviceCatalog
+import com.smartsocks.app.platform.RecordingPrompts
 import com.smartsocks.app.platform.SessionActions
 import com.smartsocks.app.platform.UnavailableReason
 import com.smartsocks.app.playback.SessionsController
@@ -90,6 +91,7 @@ fun SmartSocksApp(
     recorder: RecordingController? = null,
     sessions: SessionsController? = null,
     sessionActions: SessionActions = SessionActions.None,
+    recordingPrompts: RecordingPrompts = RecordingPrompts.None,
     startScreen: AppScreen = if (startInSettings) AppScreen.SETTINGS else AppScreen.LIVE,
 ) {
     val current by settings.settings.collectAsState()
@@ -193,6 +195,7 @@ fun SmartSocksApp(
                             modifier = Modifier.weight(1f),
                             recorder = recorder,
                             onOpenRecording = { id -> sessions?.open(id) { screen = AppScreen.PLAYER } },
+                            recordingPrompts = recordingPrompts,
                         )
                     }
                 }

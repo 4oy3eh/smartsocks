@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- A recording goes on in the background: RecordingService (foreground service, wake lock, notification). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Recording a Bluetooth sock; its prerequisite is the granted BLUETOOTH_CONNECT (transport-android). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Recording the simulator only: no connected device, and dataSync would be limited to 6 h a day. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application
         android:name=".android.SmartSocksApplication"
         android:allowBackup="true"
@@ -19,6 +28,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".android.RecordingService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps recording a session of the built-in sensor simulator (no Bluetooth device) to a local file while the app is in the background, until the user stops it from the app or the notification." />
+        </service>
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.sessions"

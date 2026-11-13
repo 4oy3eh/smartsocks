@@ -34,6 +34,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveController
+import com.smartsocks.app.platform.RecordingPrompts
 import com.smartsocks.app.playback.PlayerController
 import com.smartsocks.app.recording.RecordingController
 import com.smartsocks.app.recording.RecordingResult
@@ -46,7 +47,11 @@ import kotlinx.coroutines.delay
 
 /** Record (idle) or Stop (recording). Disabled while no foot streams; the strip below says why. */
 @Composable
-internal fun RecordButton(recorder: RecordingController, controller: LiveController) {
+internal fun RecordButton(
+    recorder: RecordingController,
+    controller: LiveController,
+    prompts: RecordingPrompts = RecordingPrompts.None,
+) {
     val state by recorder.state.collectAsState()
     val left by controller.left.status.collectAsState()
     val right by controller.right.status.collectAsState()
@@ -54,7 +59,10 @@ internal fun RecordButton(recorder: RecordingController, controller: LiveControl
     val sock = LocalSockColors.current
     when (state) {
         RecordingState.Idle -> FilledTonalButton(
-            onClick = { recorder.start() },
+            onClick = {
+                prompts.beforeRecording()
+                recorder.start()
+            },
             enabled = canRecord,
             contentPadding = PaddingValues(start = 12.dp, end = 16.dp),
         ) {
@@ -90,15 +98,20 @@ internal fun RecordingStrip(
     controller: LiveController,
     compact: Boolean,
     onOpen: (String) -> Unit,
+    prompts: RecordingPrompts = RecordingPrompts.None,
 ) {
     val state by recorder.state.collectAsState()
     val result by recorder.lastResult.collectAsState()
+    val notice by prompts.notice.collectAsState()
     val left by controller.left.status.collectAsState()
     val right by controller.right.status.collectAsState()
     val canRecord = left.state == LinkState.Streaming || right.state == LinkState.Streaming
     val modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth().padding(top = 8.dp)
     when (val s = state) {
-        is RecordingState.Recording -> RecordingNow(s, recorder, controller, compact, modifier)
+        is RecordingState.Recording -> {
+            RecordingNow(s, recorder, controller, compact, modifier)
+            notice?.let { PromptNotice(it, prompts::dismissNotice, modifier) }
+        }
 
         is RecordingState.Stopping, RecordingState.Starting -> StripText(
             if (s is RecordingState.Stopping) "Saving the recording…" else "Starting the recording…",
@@ -110,6 +123,23 @@ internal fun RecordingStrip(
             when {
                 r != null -> ResultNotice(r, recorder, onOpen, modifier)
                 !canRecord -> StripText("Connect a foot to record a session.", modifier)
+            }
+        }
+    }
+}
+
+/** A platform note about the running recording (e.g. notifications are off), until dismissed. */
+@Composable
+private fun PromptNotice(text: String, onDismiss: () -> Unit, modifier: Modifier) {
+    Surface(modifier, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+        Row(Modifier.padding(start = 14.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f).padding(vertical = 6.dp),
+            )
+            IconButton(onClick = onDismiss) {
+                Icon(AppIcons.Close, contentDescription = "Dismiss", modifier = Modifier.size(18.dp))
             }
         }
     }
@@ -228,6 +258,9 @@ internal fun resultText(r: RecordingResult): String {
                 (if (name != null && r.rows > 0) ". Kept what was written: $name" else "")
 
         StopReason.Background -> "Recording stopped when the app went to the background. Saved $name · $details"
+
+        StopReason.LinksLost ->
+            "Recording stopped in the background: no recorded foot was connected. Saved $name · $details"
 
         StopReason.User, StopReason.AppClosed -> "Saved $name · $details"
     }

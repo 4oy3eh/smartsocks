@@ -7,7 +7,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import com.smartsocks.app.recording.StopReason
 import com.smartsocks.app.ui.ChartRendering
 import com.smartsocks.app.ui.LivePerf
 import com.smartsocks.app.ui.SmartSocksApp
@@ -17,6 +16,7 @@ class MainActivity : ComponentActivity() {
 
     /** Registered with the activity's creation, as result launchers must be. */
     private val deviceActions = ActivityDeviceActions(this) { model.controller.recheckDevices() }
+    private val recordingPrompts = ActivityRecordingPrompts(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -33,6 +33,7 @@ class MainActivity : ComponentActivity() {
                 recorder = model.recorder,
                 sessions = model.sessions,
                 sessionActions = platform.sessionActions,
+                recordingPrompts = recordingPrompts,
             )
         }
     }
@@ -63,7 +64,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        model.controller.setPaused(false)
         // The user may have granted the permission, paired a sock or switched Bluetooth on elsewhere meanwhile.
         deviceActions.onStart()
         deviceActions.changed()
@@ -72,16 +72,9 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         deviceActions.onStop()
-        // Since Android 12 Back keeps the root activity (and so the ViewModel) alive: without this the socks
-        // would stream in the background forever. A configuration change restarts the activity at once: keep
-        // the links up across it.
-        if (!isChangingConfigurations) {
-            // Recording does not continue in the background (that would need a foreground service): finalize the
-            // file now; the live screen says why it stopped.
-            model.recorder.stop(StopReason.Background)
-            model.sessions.player.value?.player?.pause()
-            model.controller.setPaused(true)
-        }
+        // The feet pause in the background unless a recording goes on there: SmartSocksApplication follows the
+        // started activities (a configuration change does not count as leaving). The player pauses here.
+        if (!isChangingConfigurations) model.sessions.player.value?.player?.pause()
         (application as SmartSocksApplication).flushSettings()
     }
 }

@@ -29,6 +29,8 @@ fun main() {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val settings = SettingsRepository(platform.settingsStore, scope)
     val controller = LiveController(settings, platform.devices, scope)
+    // Development aid: open straight into the settings (for screenshots without input automation).
+    val startInSettings = System.getenv("SMARTSOCKS_START_IN_SETTINGS") == "1"
 
     application {
         val state = rememberWindowState(size = DpSize(1120.dp, 760.dp))
@@ -54,7 +56,7 @@ fun main() {
             title = "SmartSocks",
         ) {
             window.minimumSize = Dimension(900, 600)
-            SmartSocksApp(settings, controller)
+            SmartSocksApp(settings, controller, platform.catalog, startInSettings = startInSettings)
         }
     }
 }

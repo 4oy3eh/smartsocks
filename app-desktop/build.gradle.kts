@@ -13,6 +13,8 @@ kotlin {
 dependencies {
     implementation(project(":app"))
     implementation(compose.desktop.currentOs)
+    // Theme and surface for the screen renderer (tools/RenderScreens).
+    implementation(libs.compose.material3)
     // Dispatchers.Main for Swing (Compose desktop's UI thread).
     implementation(libs.kotlinx.coroutines.swing)
 }
@@ -23,7 +25,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi)
             packageName = "SmartSocks"
-            packageVersion = "0.1.0"
+            packageVersion = providers.gradleProperty("smartsocks.version").get()
             description = "SmartSocks pressure insoles"
             windows {
                 menu = true

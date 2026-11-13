@@ -13,7 +13,7 @@ android {
         minSdk = 26
         targetSdk = 37
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = providers.gradleProperty("smartsocks.version").get()
     }
 
     buildTypes {
@@ -29,6 +29,7 @@ kotlin {
 
 dependencies {
     implementation(project(":app"))
+    implementation(project(":transport-android"))
     implementation(libs.compose.runtime)
     implementation(libs.compose.ui)
     implementation(libs.androidx.activity.compose)

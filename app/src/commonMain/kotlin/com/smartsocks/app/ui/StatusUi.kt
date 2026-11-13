@@ -19,6 +19,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.smartsocks.app.live.FootStatus
 import com.smartsocks.app.live.LinkState
+import com.smartsocks.app.platform.UnavailableReason
 import com.smartsocks.core.model.Foot
 
 fun LinkState.label(): String = when (this) {
@@ -51,16 +52,30 @@ private fun FootStatus.chipText(compact: Boolean): String = when (val s = state)
 
     LinkState.NoDevice -> "No device"
 
-    is LinkState.Unavailable -> "Unavailable"
+    is LinkState.Unavailable -> when (s.reason) {
+        UnavailableReason.PermissionNeeded -> "Permission needed"
+        UnavailableReason.BluetoothOff -> "Bluetooth off"
+        UnavailableReason.InUse -> "In use"
+        UnavailableReason.Unsupported -> "Unavailable"
+    }
 
     is LinkState.Disconnected -> "Disconnected"
 }
 
-/** "L · Streaming · 100/s"; a tap connects or disconnects the foot. */
+/** The user can fix this foot's state from the app: grant the permission, switch Bluetooth on. */
+val LinkState.isFixable: Boolean get() = this is LinkState.Unavailable && reason.recoverable
+
+/** One line about the link: "Streaming · 100/s", "Disconnected: Link closed". */
+fun FootStatus.statusText(): String = when (state) {
+    LinkState.Streaming -> "Streaming · ${rate.packetsPerSecond}/s"
+    else -> state.label()
+}
+
+/** "L · Streaming · 100/s"; a tap connects or disconnects the foot (or asks for what it is missing). */
 @Composable
 fun FootChip(status: FootStatus, compact: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val colors = LocalSockColors.current
-    val enabled = status.state.isActive || status.state.canConnect
+    val enabled = status.state.isActive || status.state.canConnect || status.state.isFixable
     Surface(
         onClick = onClick,
         enabled = enabled,

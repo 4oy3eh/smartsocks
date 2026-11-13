@@ -12,7 +12,7 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
-/** The two icons the app needs, drawn here instead of pulling in the (frozen) material-icons artifact. */
+/** The few icons the app needs, drawn here instead of pulling in the (frozen) material-icons artifact. */
 object AppIcons {
     /** A gear: eight teeth around a ring, with a hole (even-odd fill). */
     val Settings: ImageVector by lazy {
@@ -43,6 +43,22 @@ object AppIcons {
                 arcTo(3.2f, 3.2f, 0f, isMoreThanHalf = true, isPositiveArc = false, 12f - 3.2f, 12f)
                 arcTo(3.2f, 3.2f, 0f, isMoreThanHalf = true, isPositiveArc = false, 12f + 3.2f, 12f)
                 close()
+            }
+        }.build()
+    }
+
+    /** Pointing down; rotate it for "collapse". */
+    val Chevron: ImageVector by lazy {
+        ImageVector.Builder("Chevron", 24.dp, 24.dp, 24f, 24f).apply {
+            path(
+                stroke = SolidColor(Color.Black),
+                strokeLineWidth = 2f,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round,
+            ) {
+                moveTo(6f, 9f)
+                lineTo(12f, 15f)
+                lineTo(18f, 9f)
             }
         }.build()
     }

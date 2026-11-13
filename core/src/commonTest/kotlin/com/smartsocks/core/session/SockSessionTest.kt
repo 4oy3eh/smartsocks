@@ -301,6 +301,92 @@ class SockSessionTest {
     }
 
     @Test
+    fun `clearing the calibration while streaming brings the leakage back`() = runTest {
+        val sim = sim(config = SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted).preloadedInsole())
+        val session = session(sim, processorSettings = ProcessorSettings(autoZeroSeconds = 0.0))
+        backgroundScope.launch { session.run() }
+        advanceTimeBy(500)
+        assertNull(session.baseline.value)
+        assertTrue(session.calibrate(samples = 50))
+        advanceTimeBy(1_000)
+        val calibrated = assertNotNull(session.baseline.value)
+        assertTrue(session.latest.value!!.calibrated)
+
+        session.clearCalibration()
+        assertNull(session.baseline.value, "cleared at once")
+        advanceTimeBy(100)
+        val state = session.latest.value!!
+        assertEquals(BaselineSource.NONE, state.baselineSource)
+        assertTrue(state.loads.all { it > 1.0 }, "leakage is load again: ${state.loads.toList()}")
+        assertNull(session.baseline.value)
+
+        // A new calibration is a new baseline object.
+        assertTrue(session.calibrate(samples = 20))
+        advanceTimeBy(1_000)
+        val again = assertNotNull(session.baseline.value)
+        assertTrue(again !== calibrated)
+    }
+
+    @Test
+    fun `clearing cancels a calibration in progress and one cleared while idle is applied on the next run`() = runTest {
+        val sim = sim(config = SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted).preloadedInsole())
+        val session = session(sim, processorSettings = ProcessorSettings(autoZeroSeconds = 0.0))
+        val first = launch { session.run() }
+        advanceTimeBy(500)
+        assertTrue(session.calibrate(samples = 500))
+        advanceTimeBy(100)
+        assertNotNull(session.calibrationProgress.value)
+        session.clearCalibration()
+        advanceTimeBy(6_000)
+        assertNull(session.calibrationProgress.value, "the calibration in progress was dropped")
+        assertNull(session.baseline.value)
+        assertEquals(BaselineSource.NONE, session.latest.value!!.baselineSource)
+
+        assertTrue(session.calibrate(samples = 20))
+        advanceTimeBy(1_000)
+        assertNotNull(session.baseline.value)
+        first.cancelAndJoin()
+
+        session.clearCalibration()
+        assertNull(session.baseline.value)
+        val second = launch { session.run() }
+        advanceTimeBy(500)
+        assertEquals(BaselineSource.NONE, session.latest.value!!.baselineSource)
+        assertNull(session.baseline.value)
+        second.cancelAndJoin()
+    }
+
+    @Test
+    fun `a baseline handed over from another session is in effect from the first sample`() = runTest {
+        val config = SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted).preloadedInsole()
+        val noAutoZero = ProcessorSettings(autoZeroSeconds = 0.0)
+        val first = session(sim(config = config), processorSettings = noAutoZero)
+        val job = launch { first.run() }
+        advanceTimeBy(500)
+        assertTrue(first.calibrate(samples = 50))
+        advanceTimeBy(1_000)
+        val baseline = assertNotNull(first.baseline.value)
+        job.cancelAndJoin()
+
+        val second = SockSession(
+            Foot.LEFT,
+            sim(config = config),
+            StreamSettings(SampleRate.HZ_50, MeasurementRange.K256),
+            processorSettings = noAutoZero,
+            clockNanos = { testScheduler.currentTime * 1_000_000 },
+            baseline = baseline,
+        )
+        assertTrue(second.baseline.value === baseline)
+        val samples = mutableListOf<BaselineSource>()
+        backgroundScope.launch { second.states.collect { samples += it.baselineSource } }
+        backgroundScope.launch { second.run() }
+        advanceTimeBy(500)
+        assertTrue(samples.isNotEmpty())
+        assertTrue(samples.all { it == BaselineSource.CALIBRATED }, "$samples")
+        assertTrue(second.latest.value!!.loads.all { it < 1.0 })
+    }
+
+    @Test
     fun `reconnect keeps the baseline`() = runTest {
         val sim = sim(config = SimConfig(connectDelayMillis = 0, mode = SimMode.Lifted).preloadedInsole())
         val session = session(sim)

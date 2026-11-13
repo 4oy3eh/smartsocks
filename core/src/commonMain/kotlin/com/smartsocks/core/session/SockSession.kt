@@ -2,6 +2,7 @@ package com.smartsocks.core.session
 
 import com.smartsocks.core.analytics.Balance
 import com.smartsocks.core.analytics.BalanceCalculator
+import com.smartsocks.core.analytics.Baseline
 import com.smartsocks.core.analytics.FootProcessor
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.analytics.ProcessorSettings
@@ -89,6 +90,9 @@ class TimedPacket(val foot: Foot, val timestampNanos: Long, val packet: RawPacke
  * Samples are stamped by index at the nominal sample rate ([SampleClock]), slowly steered towards [clockNanos].
  * Pass the **same** [clockNanos] to the sessions of both feet, otherwise their timestamps (and so the interleaved
  * recording) do not line up. [run] may be called again after it returned (reconnect); the baseline survives.
+ *
+ * [baseline] is an explicit calibration to start from, e.g. the one of a previous session of the same insole at
+ * the same [StreamSettings.range] (a baseline measured at another range does not apply: what saturates differs).
  */
 class SockSession(
     val foot: Foot,
@@ -98,10 +102,22 @@ class SockSession(
     processorSettings: ProcessorSettings = ProcessorSettings(),
     private val clockNanos: () -> Long = monotonicClock(),
     private val commandGapMillis: Long = 20,
+    baseline: Baseline? = null,
 ) {
     val displayName: String get() = transport.displayName
 
-    private val processor = FootProcessor(foot, layout, processorSettings)
+    private val processor = FootProcessor(foot, layout, processorSettings).apply { setBaseline(baseline) }
+
+    private val _baseline = MutableStateFlow(baseline)
+
+    /**
+     * The explicit calibration in effect, null without one (then auto-zero applies, if enabled). A new object for
+     * every completed [calibrate]; null right after [clearCalibration].
+     */
+    val baseline: StateFlow<Baseline?> = _baseline.asStateFlow()
+
+    /** Set by [clearCalibration], taken by the packet reader (or the next [run]). */
+    private val clearRequested = MutableStateFlow(false)
 
     private val _processorSettings = MutableStateFlow(processorSettings)
 
@@ -200,6 +216,7 @@ class SockSession(
         _calibrationProgress.value = null
         processor.cancelCalibration()
         applyPendingProcessorSettings()
+        applyPendingClear()
         windowPackets = 0
         packetsPerSecond = 0.0
         rateMismatch = false
@@ -272,6 +289,8 @@ class SockSession(
                 }
                 calibrationRequest.value = null
                 processor.cancelCalibration()
+                applyPendingClear()
+                publishBaseline()
                 _calibrationProgress.value = null
                 _latest.value = null
                 publishStats()
@@ -309,6 +328,31 @@ class SockSession(
     }
 
     /**
+     * Drops the explicit calibration (and cancels one in progress or requested): loads are measured from the
+     * auto-zero baseline again, or from none. [baseline] is null at once; the packet reader applies it with the next
+     * packet, or the next [run] when it starts. May be called from any thread, at any time.
+     */
+    fun clearCalibration() {
+        calibrationRequest.value = null
+        clearRequested.value = true // before the null, see publishBaseline()
+        _baseline.value = null
+    }
+
+    private fun applyPendingClear() {
+        if (clearRequested.value && clearRequested.compareAndSet(true, false)) processor.setBaseline(null)
+    }
+
+    /** Publishes a calibration the processor completed; a clear still pending wins (it is applied next). */
+    private fun publishBaseline() {
+        val current = processor.baseline
+        if (current === _baseline.value || clearRequested.value) return
+        _baseline.value = current
+        // clearCalibration() may have run between the check and the write: it sets the flag before it publishes
+        // null, so seeing the flag now means our write may have overwritten that null.
+        if (clearRequested.value) _baseline.compareAndSet(current, null)
+    }
+
+    /**
      * Changes contact thresholds, auto-zero or COP smoothing without reconnecting: the baseline (calibrated or
      * auto-zero) and a calibration in progress are kept, see [FootProcessor.updateSettings]. Takes effect with the
      * next packet, or when the next [run] starts. May be called from any thread, at any time.
@@ -326,6 +370,7 @@ class SockSession(
 
     private fun onPacket(packet: RawPacket) {
         applyPendingProcessorSettings()
+        applyPendingClear()
         if (calibrationRequest.value != null) {
             calibrationRequest.getAndUpdate { null }?.let {
                 processor.startCalibration(it)
@@ -338,6 +383,7 @@ class SockSession(
         val ohms = DoubleArray(SENSOR_COUNT) { settings.range.countsToOhms(packet.count(it)) }
         val state = processor.process(SensorFrame(foot, now, ohms))
         _calibrationProgress.value = processor.calibrationProgress
+        if (processor.baseline !== _baseline.value) publishBaseline()
 
         _latest.value = state
         _states.tryEmit(state)

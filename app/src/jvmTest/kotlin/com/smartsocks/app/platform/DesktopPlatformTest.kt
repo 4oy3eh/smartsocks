@@ -6,6 +6,7 @@ import com.smartsocks.core.settings.AppTheme
 import com.smartsocks.core.settings.DeviceChoice
 import com.smartsocks.core.sim.SimMode
 import com.smartsocks.core.sim.SimulatedSockTransport
+import com.smartsocks.transport.desktop.SerialPortInfo
 import com.smartsocks.transport.desktop.SerialSockTransport
 import kotlinx.coroutines.test.runTest
 import java.io.File
@@ -76,6 +77,27 @@ class DesktopPlatformTest {
         assertEquals(4, attempts, "the first try and three retries")
         assertEquals(AppTheme.DARK, store.load().theme)
         assertTrue(dir.listFiles()!!.none { it.name.endsWith(".tmp") })
+    }
+
+    @Test
+    fun desktopCatalogOffersTheSimulatorAndSerialPorts() {
+        val catalog = DesktopDeviceCatalog {
+            listOf(
+                SerialPortInfo("COM3", "Standard Serial over Bluetooth link", looksLikeBluetooth = true),
+                SerialPortInfo("COM1", "Communications Port", looksLikeBluetooth = false),
+            )
+        }
+        assertEquals(listOf(DeviceKind.Simulator, DeviceKind.SerialPort), catalog.kinds)
+        assertEquals(
+            listOf(
+                SerialPortEntry("COM3", "Standard Serial over Bluetooth link", looksLikeSock = true),
+                SerialPortEntry("COM1", "Communications Port", looksLikeSock = false),
+            ),
+            catalog.serialPorts(),
+        )
+        assertEquals(BluetoothState.Unsupported, catalog.bluetoothState())
+        assertTrue(catalog.bluetoothDevices().isEmpty())
+        assertTrue(DesktopDeviceCatalog { error("enumeration failed") }.serialPorts().isEmpty())
     }
 
     @Test

@@ -79,4 +79,34 @@ object AppIcons {
             }
         }.build()
     }
+
+    /** Two bars. */
+    val Pause: ImageVector by lazy {
+        ImageVector.Builder("Pause", 24.dp, 24.dp, 24f, 24f).apply {
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(7f, 5f)
+                lineTo(10f, 5f)
+                lineTo(10f, 19f)
+                lineTo(7f, 19f)
+                close()
+                moveTo(14f, 5f)
+                lineTo(17f, 5f)
+                lineTo(17f, 19f)
+                lineTo(14f, 19f)
+                close()
+            }
+        }.build()
+    }
+
+    /** A triangle pointing right. */
+    val Play: ImageVector by lazy {
+        ImageVector.Builder("Play", 24.dp, 24.dp, 24f, 24f).apply {
+            path(fill = SolidColor(Color.Black), strokeLineJoin = StrokeJoin.Round) {
+                moveTo(8f, 5f)
+                lineTo(19f, 12f)
+                lineTo(8f, 19f)
+                close()
+            }
+        }.build()
+    }
 }

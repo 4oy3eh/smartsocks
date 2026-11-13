@@ -25,10 +25,15 @@ import com.smartsocks.app.ui.SmartSocksApp
 import com.smartsocks.app.ui.SmartSocksTheme
 import com.smartsocks.core.analytics.ProcessorSettings
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.protocol.SampleRate
+import com.smartsocks.core.session.StreamSettings
 import com.smartsocks.core.settings.AppSettings
 import com.smartsocks.core.settings.AppTheme
+import com.smartsocks.core.settings.ChartSettings
+import com.smartsocks.core.settings.ChartWindow
 import com.smartsocks.core.settings.DeviceChoice
 import com.smartsocks.core.settings.InMemorySettingsStore
+import com.smartsocks.core.settings.LiveView
 import com.smartsocks.core.settings.SettingsCodec
 import com.smartsocks.core.settings.SettingsRepository
 import com.smartsocks.core.sim.SimMode
@@ -60,6 +65,10 @@ private class Case(
     val bluetooth: DeviceResult? = null,
     /** The Bluetooth permission was denied for good. */
     val permissionBlocked: Boolean = false,
+    /** Frames (about 16 ms each) rendered before the capture; the charts need some seconds of history. */
+    val warmupFrames: Int = 150,
+    /** Text scale on top of [density] (accessibility setting). */
+    val fontScale: Float = 1f,
 )
 
 private class PreviewActions(blocked: Boolean) : DeviceActions {
@@ -97,7 +106,75 @@ private class AndroidMock(val state: BluetoothState) : DeviceCatalog {
 private val sockL = DeviceChoice.Bluetooth("00:16:A4:10:20:30", "Block 3")
 private val tuned = ProcessorSettings(contactOnThreshold = 35.0, contactOffThreshold = 15.0, copBeta = 0.2)
 
+private val chart200 = AppSettings(liveView = LiveView.CHART, stream = StreamSettings(SampleRate.HZ_200))
+private val numbers = AppSettings(liveView = LiveView.NUMBERS)
+
 private val cases = listOf(
+    // Chart and numbers views: both feet at 200 Hz for about 7 s so that a 5 or 10 s window is full.
+    Case("chart-desktop-light", 1120, 760, 1f, AppTheme.LIGHT, settings = chart200, warmupFrames = 420),
+    Case(
+        "chart-desktop-dark",
+        1120,
+        760,
+        1f,
+        AppTheme.DARK,
+        settings = chart200.copy(chart = ChartSettings(ChartWindow.SECONDS_5, Foot.RIGHT)),
+        warmupFrames = 420,
+    ),
+    Case("chart-desktop-min", 900, 600, 1f, AppTheme.LIGHT, settings = chart200, warmupFrames = 420),
+    Case("chart-phone", 360, 780, 2.5f, AppTheme.LIGHT, settings = chart200, warmupFrames = 420),
+    // One foot without a device: its legend says so, its lines are missing.
+    Case(
+        "chart-phone-dark-one-foot",
+        360,
+        780,
+        2.5f,
+        AppTheme.DARK,
+        settings = chart200.copy(right = DeviceChoice.None),
+        warmupFrames = 420,
+    ),
+    Case("numbers-desktop-light", 1120, 760, 1f, AppTheme.LIGHT, settings = numbers),
+    Case(
+        "numbers-desktop-dark",
+        1120,
+        760,
+        1f,
+        AppTheme.DARK,
+        settings = numbers.copy(right = DeviceChoice.SerialPort("COM99")),
+    ),
+    Case("numbers-phone", 360, 780, 2.5f, AppTheme.LIGHT, settings = numbers),
+    Case("numbers-phone-full", 360, 1500, 2.5f, AppTheme.DARK, settings = numbers),
+    // Too little room for the charts: a small phone in landscape with the largest font (labels larger than plots).
+    Case(
+        "chart-phone-landscape-font2",
+        640,
+        320,
+        2.5f,
+        AppTheme.LIGHT,
+        settings = chart200,
+        warmupFrames = 240,
+        fontScale = 2f,
+    ),
+    Case(
+        "chart-tiny-font2",
+        280,
+        420,
+        2f,
+        AppTheme.DARK,
+        settings = chart200.copy(chart = ChartSettings(ChartWindow.SECONDS_30, Foot.RIGHT)),
+        warmupFrames = 240,
+        fontScale = 2f,
+    ),
+    Case(
+        "numbers-phone-landscape-font2",
+        640,
+        320,
+        2.5f,
+        AppTheme.DARK,
+        settings = numbers,
+        fontScale = 2f,
+    ),
+
     Case("desktop-light", 1120, 760, 1f, AppTheme.LIGHT),
     Case("desktop-dark", 1120, 760, 1f, AppTheme.DARK),
     Case("desktop-min", 900, 600, 1f, AppTheme.LIGHT),
@@ -252,7 +329,7 @@ fun main(args: Array<String>) {
             val scene = ImageComposeScene(
                 width = (case.widthDp * case.density).toInt(),
                 height = (case.heightDp * case.density).toInt(),
-                density = Density(case.density),
+                density = Density(case.density, case.fontScale),
             ) {
                 when (case.screen) {
                     Screen.LIVE, Screen.SETTINGS -> SmartSocksApp(
@@ -281,15 +358,19 @@ fun main(args: Array<String>) {
                 }
             }
             val start = System.nanoTime()
-            // ~2.5 s of frames so that both feet stream and the COP trails fill.
-            repeat(150) {
-                scene.render(System.nanoTime() - start)
+            // ~2.5 s of frames (by default) so that both feet stream and the COP trails fill.
+            var renderNanos = 0L
+            repeat(case.warmupFrames) {
+                val t0 = System.nanoTime()
+                scene.render(t0 - start)
+                renderNanos += System.nanoTime() - t0
                 delay(16)
             }
+            val avgMillis = "%.2f".format(renderNanos / case.warmupFrames / 1e6)
             val image = scene.render(System.nanoTime() - start)
             val file = File(out, "${case.name}.png")
             file.writeBytes(requireNotNull(image.encodeToData(EncodedImageFormat.PNG)).bytes)
-            println("wrote $file")
+            println("wrote $file (off-screen render avg $avgMillis ms/frame)")
             scene.close()
             controller.shutdown()
             scope.cancel()

@@ -24,6 +24,16 @@ enum class AppTheme { SYSTEM, LIGHT, DARK }
 /** The main visualisation of the live screen. */
 enum class LiveView { COP, CHART, NUMBERS }
 
+/** How much history the live charts show. */
+enum class ChartWindow(val seconds: Int) {
+    SECONDS_5(5),
+    SECONDS_10(10),
+    SECONDS_30(30),
+}
+
+/** The live chart's choices: its time window and the foot whose six sensors it plots. */
+data class ChartSettings(val window: ChartWindow = ChartWindow.SECONDS_10, val sensorFoot: Foot = Foot.LEFT)
+
 /** Everything the app remembers between runs. Persisted by [SettingsRepository] in the [SettingsCodec] format. */
 data class AppSettings(
     val left: DeviceChoice = DeviceChoice.Simulator(),
@@ -33,6 +43,7 @@ data class AppSettings(
     val processor: ProcessorSettings = ProcessorSettings(),
     val theme: AppTheme = AppTheme.SYSTEM,
     val liveView: LiveView = LiveView.COP,
+    val chart: ChartSettings = ChartSettings(),
     /** Connect to the remembered devices on start. */
     val autoConnect: Boolean = true,
 ) {

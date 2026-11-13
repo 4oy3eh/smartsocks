@@ -20,6 +20,7 @@ import com.smartsocks.core.settings.SettingsRepository
 import com.smartsocks.core.sim.SimMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
@@ -127,8 +128,9 @@ data class FootStatus(
  * An explicit calibration survives a session rebuild that keeps the sock (by its identity: port or address, not
  * its display name) and the measurement range (e.g. a new sample rate).
  *
- * Streaming runs in [scope] independently of the UI; the UI calls [sample] once per frame. Both feet share
- * [clockNanos] (pass a virtual one only in tests).
+ * Streaming runs in [scope] independently of the UI; the UI calls [sample] once per frame. Every sample of both
+ * feet also goes into [history] (for the charts), from the stream's own coroutines. Both feet share [clockNanos]
+ * (pass a virtual one only in tests); [nowNanos] reads it, on the time axis of the samples' timestamps.
  */
 class LiveController(
     private val settings: SettingsRepository,
@@ -150,6 +152,15 @@ class LiveController(
     fun link(foot: Foot): FootLink = if (foot == Foot.LEFT) left else right
 
     private val sampler = LiveSampler()
+
+    /**
+     * The last [FootHistory.capacity] samples of each foot at full stream rate, kept across reconnects and session
+     * rebuilds (with a gap), see [FootHistory].
+     */
+    val history = LiveHistory()
+
+    /** Now, on the clock the samples are stamped from (their [FootState.timestampNanos]). */
+    fun nowNanos(): Long = clockNanos()
 
     init {
         this.scope.launch {
@@ -456,6 +467,9 @@ class LiveController(
             resetStaleCalibration(inEffect = session.baseline.value != null)
             try {
                 coroutineScope {
+                    val footHistory = history.foot(foot)
+                    // Every sample, not the conflated latest; subscribed before the session can emit anything.
+                    launch(start = CoroutineStart.UNDISPATCHED) { session.states.collect(footHistory::append) }
                     launch {
                         session.baseline.collect { baseline ->
                             _calibrated.value = baseline != null
@@ -495,6 +509,8 @@ class LiveController(
                             if (req.connect && !paused) {
                                 // Bluetooth switched off (or the permission revoked) since the session was built.
                                 devices.check(foot, device)?.let { throw DeviceBlocked(it) }
+                                // Whatever came before (another run, another session) is not joined to this run.
+                                footHistory.markBreak()
                                 session.run()
                                 // The link ended by itself (failure, drop): it stays down until asked again.
                                 request.compareAndSet(req, Request(false, req.nextId))

@@ -38,6 +38,7 @@ import com.smartsocks.app.live.FootView
 import com.smartsocks.app.live.LiveController
 import com.smartsocks.app.live.LiveSnapshot
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.settings.ChartSettings
 import com.smartsocks.core.settings.LiveView
 import kotlin.math.roundToInt
 
@@ -50,9 +51,15 @@ fun rememberLiveSnapshot(controller: LiveController): State<LiveSnapshot> {
     val state = remember(controller) { mutableStateOf(controller.sample(0)) }
     LaunchedEffect(controller) {
         while (true) {
-            val snapshot = withFrameNanos { controller.sample(it) }
+            val snapshot = withFrameNanos {
+                LivePerf.frame(it)
+                controller.sample(it)
+            }
             state.value = snapshot
-            if (!controller.isAnimating(snapshot)) controller.awaitStatusChange(snapshot)
+            if (!controller.isAnimating(snapshot)) {
+                LivePerf.idle()
+                controller.awaitStatusChange(snapshot)
+            }
         }
     }
     return state
@@ -63,6 +70,8 @@ fun LiveScreen(
     controller: LiveController,
     view: LiveView,
     onViewChange: (LiveView) -> Unit,
+    chart: ChartSettings,
+    onChartChange: (ChartSettings) -> Unit,
     compact: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -79,11 +88,15 @@ fun LiveScreen(
         ) {
             when (view) {
                 LiveView.COP -> CopView(snapshot, Modifier.fillMaxSize())
-                LiveView.CHART, LiveView.NUMBERS -> ComingSoon()
+                LiveView.CHART -> ChartView(controller, snapshot, chart, onChartChange, compact, Modifier.fillMaxSize())
+                LiveView.NUMBERS -> NumbersView(controller, snapshot, compact, Modifier.fillMaxSize())
             }
         }
-        BalancePanel(snapshot, Modifier.widthIn(max = 720.dp).fillMaxWidth())
-        Spacer(Modifier.height(if (compact) 12.dp else 20.dp))
+        // The chart needs the height; the numbers show each foot's share themselves.
+        if (view == LiveView.COP) {
+            BalancePanel(snapshot, Modifier.widthIn(max = 720.dp).fillMaxWidth())
+            Spacer(Modifier.height(if (compact) 12.dp else 20.dp))
+        }
     }
 }
 
@@ -116,19 +129,6 @@ private val LiveView.title: String
         LiveView.CHART -> "Chart"
         LiveView.NUMBERS -> "Numbers"
     }
-
-@Composable
-private fun ComingSoon() {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("Coming soon", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "This view is not available yet.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
 
 /** L/R split with percentages and each foot's total load. Text changes only when the shown numbers change. */
 @Composable

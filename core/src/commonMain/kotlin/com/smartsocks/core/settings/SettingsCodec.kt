@@ -61,6 +61,8 @@ object SettingsCodec {
         }
         put("theme", settings.theme.name)
         put("liveView", settings.liveView.name)
+        put("chart.window", settings.chart.window.name)
+        put("chart.sensorFoot", settings.chart.sensorFoot.name)
         put("autoConnect", settings.autoConnect)
         return out.toString()
     }
@@ -92,6 +94,10 @@ object SettingsCodec {
             processor = processor(),
             theme = enum("theme", defaults.theme) { AppTheme.valueOf(it) },
             liveView = enum("liveView", defaults.liveView) { LiveView.valueOf(it) },
+            chart = ChartSettings(
+                window = enum("chart.window", defaults.chart.window) { ChartWindow.valueOf(it) },
+                sensorFoot = enum("chart.sensorFoot", defaults.chart.sensorFoot) { Foot.valueOf(it) },
+            ),
             autoConnect = boolean("autoConnect", defaults.autoConnect),
         )
 

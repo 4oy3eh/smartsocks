@@ -27,6 +27,12 @@ class SockColors(
     val insole: Color,
     val insoleEdge: Color,
     val cop: Color,
+    /**
+     * Categorical colours for the six sensor lines, in channel order (validated light/dark steps of a CVD-safe
+     * palette; the order is part of that). Not for the feet: those are primary (left) and secondary (right), as in
+     * the balance bar.
+     */
+    val series: List<Color>,
 )
 
 // One accent (ember orange) on warm neutrals.
@@ -92,6 +98,14 @@ private val LightSock = SockColors(
     insole = Color(0xFFFFFFFF),
     insoleEdge = Color(0xFFCFCBC4),
     cop = Color(0xFF1B1B1A),
+    series = listOf(
+        Color(0xFF2A78D6),
+        Color(0xFFEB6834),
+        Color(0xFF1BAF7A),
+        Color(0xFFEDA100),
+        Color(0xFFE87BA4),
+        Color(0xFF008300),
+    ),
 )
 
 private val DarkSock = SockColors(
@@ -103,6 +117,14 @@ private val DarkSock = SockColors(
     insole = Color(0xFF1F1E1D),
     insoleEdge = Color(0xFF46433F),
     cop = Color(0xFFF4F2EE),
+    series = listOf(
+        Color(0xFF3987E5),
+        Color(0xFFD95926),
+        Color(0xFF199E70),
+        Color(0xFFC98500),
+        Color(0xFFD55181),
+        Color(0xFF008300),
+    ),
 )
 
 val LocalSockColors = staticCompositionLocalOf { LightSock }

@@ -1,5 +1,6 @@
 package com.smartsocks.desktop
 
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -12,16 +13,21 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.smartsocks.app.live.LiveController
 import com.smartsocks.app.platform.desktopPlatform
+import com.smartsocks.app.ui.LivePerf
 import com.smartsocks.app.ui.SmartSocksApp
+import com.smartsocks.core.settings.LiveView
 import com.smartsocks.core.settings.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.awt.Dimension
+import java.lang.management.ManagementFactory
+import kotlin.math.roundToInt
 
 fun main() {
     val platform = desktopPlatform()
@@ -31,10 +37,30 @@ fun main() {
     val controller = LiveController(settings, platform.devices, scope)
     // Development aid: open straight into the settings (for screenshots without input automation).
     val startInSettings = System.getenv("SMARTSOCKS_START_IN_SETTINGS") == "1"
+    // Development aid: switch the live view ("cop", "chart", "numbers"); remembered like a choice in the UI.
+    System.getenv("SMARTSOCKS_LIVE_VIEW")?.let { name ->
+        LiveView.entries.firstOrNull { it.name.equals(name, ignoreCase = true) }?.let { view ->
+            settings.update { it.copy(liveView = view) }
+        }
+    }
+    // Development aid: print the live screen's frame pacing and the chart's CPU time every few seconds.
+    val perf = System.getenv("SMARTSOCKS_PERF") == "1"
+    LivePerf.enabled = perf
 
     application {
         val state = rememberWindowState(size = DpSize(1120.dp, 760.dp))
         val uiScope = rememberCoroutineScope()
+        if (perf) {
+            LaunchedEffect(Unit) {
+                val os = ManagementFactory.getOperatingSystemMXBean() as? com.sun.management.OperatingSystemMXBean
+                while (true) {
+                    delay(PERF_REPORT_MILLIS)
+                    val load = os?.processCpuLoad ?: -1.0
+                    val cpu = if (load >= 0) " | process CPU ${(load * 100).roundToInt()} %" else ""
+                    LivePerf.report()?.let { println("[perf] $it$cpu") }
+                }
+            }
+        }
         var closing by remember { mutableStateOf(false) }
         Window(
             onCloseRequest = {
@@ -62,4 +88,5 @@ fun main() {
 }
 
 private const val FLUSH_TIMEOUT_MILLIS = 1_000L
+private const val PERF_REPORT_MILLIS = 5_000L
 private const val SHUTDOWN_TIMEOUT_MILLIS = 3_000L

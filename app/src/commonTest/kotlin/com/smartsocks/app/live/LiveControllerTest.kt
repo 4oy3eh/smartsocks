@@ -459,4 +459,81 @@ class LiveControllerTest {
         }
         assertEquals(listOf("close L1", "close R1", "open L1", "open R1"), f.devices.events.sorted())
     }
+
+    @Test
+    fun historyRecordsEverySampleOfBothFeetWithAGapOverAReconnect() = runTest {
+        val f = fixture(AppSettings(stream = StreamSettings(SampleRate.HZ_200)))
+        advance(2_000)
+        val second = 1_000_000_000L
+        val window = HistoryWindow(4096)
+        for (foot in Foot.entries) {
+            val history = f.controller.history.foot(foot)
+            // Every sample at the full rate, not the conflated latest one.
+            assertTrue(history.size in 300..400, "$foot: ${history.size}")
+            window.copy(history, f.controller.nowNanos(), second)
+            assertTrue(window.size in 190..210, "$foot: ${window.size}")
+            assertTrue(window.t[window.size - 1] > -0.05f, "the newest sample is recent: ${window.t[window.size - 1]}")
+        }
+
+        f.controller.left.toggle()
+        advance(500)
+        assertEquals(LinkState.Idle, f.controller.left.status.value.state)
+        val kept = f.controller.history.left.size
+        f.controller.left.toggle()
+        advance(1_500)
+        val history = f.controller.history.left
+        assertTrue(history.size > kept + 150, "recording again: ${history.size} after $kept")
+        window.copy(history, f.controller.nowNanos(), 4 * second)
+        val breaks = (1 until window.size).filter { window.breaks[it] }
+        assertEquals(1, breaks.size, "one gap, at the reconnect")
+    }
+
+    @Test
+    fun aReconnectFasterThanTheGapDetectionStillBreaksTheLine() = runTest {
+        // A sock that connects at once: the reconnect takes less than the history's own gap detection (250 ms), so
+        // only the controller marking every new run can separate the two runs.
+        val devices = DeviceFactory { foot, _ ->
+            DeviceResult.Ready(SimulatedSockTransport(foot, SimConfig(connectDelayMillis = 0)))
+        }
+        val controller = controller(repository(AppSettings(right = DeviceChoice.None)), devices)
+        advance(1_000)
+        val history = controller.history.left
+        assertTrue(history.size > 80, "${history.size}")
+        controller.left.toggle()
+        advance(30)
+        controller.left.toggle()
+        advance(1_000)
+        assertEquals(LinkState.Streaming, controller.left.status.value.state)
+
+        val window = HistoryWindow(4096)
+        window.copy(history, controller.nowNanos(), 3_000_000_000L)
+        val breaks = (1 until window.size).filter { window.breaks[it] }
+        assertEquals(1, breaks.size, "one gap, at the reconnect")
+        val gap = window.t[breaks[0]] - window.t[breaks[0] - 1]
+        assertTrue(gap < 0.25f, "shorter than the gap detection: $gap")
+    }
+
+    @Test
+    fun historyKeepsItsSamplesAcrossASessionRebuild() = runTest {
+        val f = fixture(AppSettings(right = DeviceChoice.None))
+        advance(1_500)
+        val history = f.controller.history.left
+        val before = history.size
+        val oldSession = f.controller.left.session.value
+        f.settings.update { it.copy(stream = StreamSettings(SampleRate.HZ_200)) }
+        advance(1_500)
+        assertNotSame(oldSession, f.controller.left.session.value, "a new rate rebuilds the session")
+        assertEquals(LinkState.Streaming, f.controller.left.status.value.state)
+        assertTrue(history.size > before + 150, "the old samples stay, new ones follow: ${history.size} after $before")
+
+        val window = HistoryWindow(4096)
+        window.copy(history, f.controller.nowNanos(), 10_000_000_000L)
+        val breaks = (1 until window.size).filter { window.breaks[it] }
+        assertEquals(1, breaks.size, "one gap, at the rebuild")
+        val b = breaks[0]
+        // 100 Hz before the rebuild, 200 Hz after it, on one time axis.
+        assertEquals(0.010f, window.t[b - 1] - window.t[b - 2], 0.002f)
+        assertEquals(0.005f, window.t[window.size - 1] - window.t[window.size - 2], 0.002f)
+        assertTrue(window.t[b] > window.t[b - 1])
+    }
 }

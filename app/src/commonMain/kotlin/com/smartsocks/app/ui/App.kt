@@ -128,6 +128,8 @@ fun SmartSocksApp(
                             controller = controller,
                             view = current.liveView,
                             onViewChange = { view -> settings.update { it.copy(liveView = view) } },
+                            chart = current.chart,
+                            onChartChange = { chart -> settings.update { it.copy(chart = chart) } },
                             compact = compact,
                             modifier = Modifier.weight(1f),
                         )

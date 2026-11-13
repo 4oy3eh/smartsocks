@@ -26,6 +26,7 @@ class SettingsCodecTest {
         ),
         theme = AppTheme.DARK,
         liveView = LiveView.NUMBERS,
+        chart = ChartSettings(ChartWindow.SECONDS_30, Foot.RIGHT),
         autoConnect = false,
     )
 
@@ -42,6 +43,7 @@ class SettingsCodecTest {
         assertEquals(ProcessorSettings(), d.processor)
         assertEquals(AppTheme.SYSTEM, d.theme)
         assertEquals(LiveView.COP, d.liveView)
+        assertEquals(ChartSettings(ChartWindow.SECONDS_10, Foot.LEFT), d.chart)
         assertTrue(d.autoConnect)
     }
 
@@ -51,6 +53,12 @@ class SettingsCodecTest {
         assertEquals(AppSettings(), roundTrip(AppSettings()))
         for (theme in AppTheme.entries) assertEquals(theme, roundTrip(AppSettings(theme = theme)).theme)
         for (view in LiveView.entries) assertEquals(view, roundTrip(AppSettings(liveView = view)).liveView)
+        for (window in ChartWindow.entries) {
+            for (foot in Foot.entries) {
+                val s = AppSettings(chart = ChartSettings(window, foot))
+                assertEquals(s, roundTrip(s))
+            }
+        }
         for (rate in SampleRate.entries) {
             for (range in MeasurementRange.entries) {
                 val s = AppSettings(stream = StreamSettings(rate, range))
@@ -170,6 +178,19 @@ class SettingsCodecTest {
             ),
             s,
         )
+    }
+
+    @Test
+    fun `chart settings fall back field by field`() {
+        assertEquals(
+            ChartSettings(ChartWindow.SECONDS_10, Foot.RIGHT),
+            SettingsCodec.decode(withVersion("chart.window=SECONDS_7", "chart.sensorFoot=RIGHT")).chart,
+        )
+        assertEquals(
+            ChartSettings(ChartWindow.SECONDS_5, Foot.LEFT),
+            SettingsCodec.decode(withVersion("chart.window=SECONDS_5", "chart.sensorFoot=middle")).chart,
+        )
+        assertEquals(ChartSettings(), SettingsCodec.decode(withVersion("theme=DARK")).chart)
     }
 
     @Test

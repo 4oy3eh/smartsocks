@@ -4,6 +4,9 @@ package com.smartsocks.core.recording
 interface RecordingSink {
     fun writeLine(line: String)
 
+    /** Pushes buffered lines to the storage, so that a crash loses at most what came after. */
+    fun flush() = Unit
+
     fun close()
 }
 

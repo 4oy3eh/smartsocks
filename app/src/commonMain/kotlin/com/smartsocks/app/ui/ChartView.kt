@@ -2,6 +2,8 @@ package com.smartsocks.app.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,6 +52,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
@@ -60,7 +63,6 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.smartsocks.app.live.AutoScale
 import com.smartsocks.app.live.ChartFrame
-import com.smartsocks.app.live.FootStatus
 import com.smartsocks.app.live.HistoryWindow
 import com.smartsocks.app.live.LineReducer
 import com.smartsocks.app.live.LineSink
@@ -70,14 +72,18 @@ import com.smartsocks.app.live.LiveGeometry
 import com.smartsocks.app.live.LiveSnapshot
 import com.smartsocks.app.live.NiceNumbers
 import com.smartsocks.app.live.SensorNames
+import com.smartsocks.app.playback.PlayerController
 import com.smartsocks.app.settings.fixed
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.protocol.SENSOR_COUNT
 import com.smartsocks.core.settings.ChartSettings
 import com.smartsocks.core.settings.ChartWindow
+import kotlinx.coroutines.flow.first
 import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 /**
  * Per frame: the copied windows of both feet and the y scales. Owned by the UI thread: [update] runs in the frame
@@ -87,6 +93,12 @@ private class ChartModel {
     val frame = ChartFrame()
     val total = AutoScale(floor = 50f)
     val sensors = AutoScale(floor = 20f)
+
+    /** Session time (s) at the right edge for playback (absolute time labels); null for live ("now", "−5 s"). */
+    var endSeconds: Double? = null
+
+    /** Playhead position relative to the right edge, seconds (playback); null for none. */
+    var playheadSeconds: Float? = null
 
     /** [fitScales]: fit the y scales to this frame at once (paused, or another window or foot), no hysteresis. */
     fun update(controller: LiveController, nowNanos: Long, seconds: Int, sensorFoot: Foot, fitScales: Boolean) {
@@ -100,6 +112,17 @@ private class ChartModel {
             total.update(totalMax, nowNanos)
             sensors.update(sensorMax, nowNanos)
         }
+    }
+
+    /** A playback window around [positionMillis], on scales fixed for the whole session (scrubbing never jumps). */
+    fun update(player: PlayerController, positionMillis: Double, seconds: Int) {
+        val span = seconds * 1000.0
+        val end = player.chartWindowEnd(positionMillis, span)
+        frame.update(player.timeline, end, seconds)
+        endSeconds = end / 1000
+        playheadSeconds = ((positionMillis - end) / 1000).toFloat()
+        total.reset(player.overview.maxTotal)
+        sensors.reset(player.overview.maxSensorLoad)
     }
 }
 
@@ -174,16 +197,19 @@ private class ChartColors(
     val axis: Color,
     val label: Color,
     val contact: Color,
+    val playhead: Color,
 ) {
     fun foot(foot: Foot) = if (foot == Foot.LEFT) left else right
 }
+
+/** What a chart legend says about a foot: its name (and state) and whether it is muted (no data). */
+internal class LegendEntry(val text: String, val muted: Boolean)
 
 /**
  * The live chart: total load per foot, the six sensors of one foot, and the COP's heel-to-toe position, stacked on
  * one time axis that scrolls right to left. It plots the controller's full-rate history: the data is copied once
  * per frame (only while a foot streams), Pause freezes the picture while recording goes on.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChartView(
     controller: LiveController,
@@ -196,7 +222,6 @@ fun ChartView(
     // Not saved: the frozen moment lives in [model], which a recreated screen does not have, so it starts live.
     var paused by remember { mutableStateOf(false) }
     val model = remember { ChartModel() }
-    val plotter = remember { Plotter() }
     val tick = remember { mutableIntStateOf(0) }
     val truncated = remember { mutableStateOf(false) }
     val seconds = chart.window.seconds
@@ -228,47 +253,11 @@ fun ChartView(
         }
     }
 
-    val scheme = MaterialTheme.colorScheme
-    val sock = LocalSockColors.current
-    val colors = ChartColors(
-        left = scheme.primary,
-        right = scheme.secondary,
-        sensors = sock.series,
-        grid = scheme.outlineVariant,
-        axis = scheme.outline,
-        label = scheme.onSurfaceVariant,
-        contact = (if (sensorFoot == Foot.LEFT) scheme.primary else scheme.secondary).copy(alpha = 0.08f),
-    )
-    val measurer = rememberTextMeasurer(cacheSize = 0)
-    val baseLabel = MaterialTheme.typography.labelSmall
-    val labels = remember(measurer, baseLabel, colors.label) {
-        LabelCache(measurer, baseLabel.copy(color = colors.label, fontFeatureSettings = "tnum"))
-    }
-    val density = LocalDensity.current
-    val strokes = remember(density) { ChartStrokes(density) }
     val leftStatus by remember { derivedStateOf { snapshot.value.left.status } }
     val rightStatus by remember { derivedStateOf { snapshot.value.right.status } }
-    val names = SensorNames.Default
 
     Column(modifier) {
-        Row(
-            Modifier.fillMaxWidth().padding(bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            SingleChoiceSegmentedButtonRow(Modifier.width(if (compact) 180.dp else 220.dp)) {
-                val windows = ChartWindow.entries
-                windows.forEachIndexed { i, w ->
-                    SegmentedButton(
-                        selected = w == chart.window,
-                        onClick = { onChartChange(chart.copy(window = w)) },
-                        shape = SegmentedButtonDefaults.itemShape(i, windows.size),
-                        icon = {},
-                        colors = segmentColors(),
-                    ) { Text("${w.seconds} s", maxLines = 1) }
-                }
-            }
-            Spacer(Modifier.weight(1f))
+        ChartControls(chart, onChartChange, compact) {
             FilledTonalButton(
                 onClick = { paused = !paused },
                 contentPadding = PaddingValues(start = 14.dp, end = 18.dp),
@@ -290,96 +279,255 @@ fun ChartView(
                 modifier = Modifier.padding(bottom = 6.dp),
             )
         }
+        ChartPanels(
+            model = model,
+            tick = tick,
+            sensorFoot = sensorFoot,
+            onSensorFoot = { onChartChange(chart.copy(sensorFoot = it)) },
+            legend = { foot ->
+                val status = if (foot == Foot.LEFT) leftStatus else rightStatus
+                val name = if (foot == Foot.LEFT) "Left" else "Right"
+                val streaming = status.state == LinkState.Streaming
+                LegendEntry(if (streaming) name else "$name · ${status.statusText()}", muted = !streaming)
+            },
+            compact = compact,
+        )
+    }
+}
 
-        val panelGap = if (compact) 6.dp else 10.dp
-        ChartPanel(
-            title = "Total load",
-            unit = "µS",
-            legend = {
-                FootLegend(leftStatus, colors.left)
-                FootLegend(rightStatus, colors.right)
-            },
-            modifier = Modifier.weight(1f),
-        ) {
-            Canvas(Modifier.fillMaxSize()) {
-                tick.intValue // a new frame redraws (draw phase only, no recomposition)
-                val t0 = LivePerf.start()
-                val plot = plotArea(withTimeLabels = false)
-                val scale = model.total.max
-                drawTimeGrid(plot, model.frame.spanSeconds, colors)
-                val step = NiceNumbers.tickStep(scale, maxTicks(plot))
-                drawValueGrid(plot, scale, step, plotter.totalGrid.of(scale, step), colors, labels)
-                clipRect(plot.left, plot.top - 2f, plot.right, plot.bottom + 2f) {
-                    val span = model.frame.spanSeconds
-                    val l = model.frame.left
-                    val r = model.frame.right
-                    plotSeries(l, l.total, plot, span, 0f, scale, plotter, colors.left, strokes.total)
-                    plotSeries(r, r.total, plot, span, 0f, scale, plotter, colors.right, strokes.total)
+/**
+ * The player's chart: the same panels over the recording, in a window of the chart setting's span that follows the
+ * position (the playhead line). A tap seeks to the moment tapped; a drag scrubs (the picture follows the finger).
+ */
+@Composable
+fun PlaybackChartView(
+    player: PlayerController,
+    chart: ChartSettings,
+    onChartChange: (ChartSettings) -> Unit,
+    compact: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val model = remember(player) { ChartModel() }
+    val tick = remember { mutableIntStateOf(0) }
+    val seconds = chart.window.seconds
+    LaunchedEffect(player, seconds) {
+        var shown = Double.NaN
+        while (true) {
+            withFrameNanos {
+                val position = player.position
+                if (position != shown) {
+                    val start = LivePerf.start()
+                    model.update(player, position, seconds)
+                    LivePerf.work(start)
+                    shown = position
+                    tick.intValue++
                 }
-                LivePerf.work(t0)
+            }
+            if (!player.state.value.playing) player.state.first { it.playing || it.positionMillis != shown }
+        }
+    }
+    val feet = player.timeline.feet
+    val density = LocalDensity.current
+    val span = seconds * 1000.0
+    val seek = Modifier
+        .pointerInput(player, span) {
+            detectTapGestures { offset ->
+                val (left, right) = plotBounds(size.width.toFloat(), density)
+                player.seekFromChart(offset.x, left, right, span)
             }
         }
-        Spacer(Modifier.height(panelGap))
-        ChartPanel(
-            title = "Sensors",
-            unit = "µS",
-            legend = {
-                for (s in 0 until SENSOR_COUNT) LegendItem(names.short[s], colors.sensors[s])
-            },
-            action = {
-                FootSelector(sensorFoot, onSelect = { onChartChange(chart.copy(sensorFoot = it)) })
-            },
-            legendBelow = compact,
-            modifier = Modifier.weight(1.25f),
-        ) {
-            Canvas(Modifier.fillMaxSize()) {
-                tick.intValue
-                val t0 = LivePerf.start()
-                val plot = plotArea(withTimeLabels = false)
-                val scale = model.sensors.max
-                val w = model.frame.foot(sensorFoot)
-                val span = model.frame.spanSeconds
-                drawContact(w, plot, span, colors.contact)
-                drawTimeGrid(plot, span, colors)
-                val step = NiceNumbers.tickStep(scale, maxTicks(plot))
-                drawValueGrid(plot, scale, step, plotter.sensorGrid.of(scale, step), colors, labels)
-                clipRect(plot.left, plot.top - 2f, plot.right, plot.bottom + 2f) {
-                    for (s in 0 until SENSOR_COUNT) {
-                        plotSeries(w, w.loads[s], plot, span, 0f, scale, plotter, colors.sensors[s], strokes.sensor)
-                    }
-                }
-                LivePerf.work(t0)
+        .pointerInput(player, span) {
+            detectHorizontalDragGestures { change, dx ->
+                change.consume()
+                val (left, right) = plotBounds(size.width.toFloat(), density)
+                player.dragChart(dx, left, right, span)
             }
         }
-        Spacer(Modifier.height(panelGap))
-        ChartPanel(
-            title = "COP heel → toe",
-            unit = null,
-            legend = {
-                LegendItem("Left", colors.left, muted = leftStatus.state != LinkState.Streaming)
-                LegendItem("Right", colors.right, muted = rightStatus.state != LinkState.Streaming)
+    Column(modifier) {
+        ChartControls(chart, onChartChange, compact) {}
+        ChartPanels(
+            model = model,
+            tick = tick,
+            sensorFoot = chart.sensorFoot,
+            onSensorFoot = { onChartChange(chart.copy(sensorFoot = it)) },
+            legend = { foot ->
+                val name = if (foot == Foot.LEFT) "Left" else "Right"
+                if (foot in feet) LegendEntry(name, muted = false) else LegendEntry("$name · Not recorded", true)
             },
-            modifier = Modifier.weight(0.9f),
-        ) {
-            Canvas(Modifier.fillMaxSize()) {
-                tick.intValue
-                val t0 = LivePerf.start()
-                val plot = plotArea(withTimeLabels = true)
-                val span = model.frame.spanSeconds
-                drawTimeGrid(plot, span, colors)
-                drawTimeLabels(plot, span, labels)
-                drawCopGrid(plot, colors, labels)
-                clipRect(plot.left, plot.top, plot.right, plot.bottom) {
-                    val l = model.frame.left
-                    val r = model.frame.right
-                    plotSeries(l, l.copY, plot, span, -COP_RANGE, COP_RANGE, plotter, colors.left, strokes.total)
-                    plotSeries(r, r.copY, plot, span, -COP_RANGE, COP_RANGE, plotter, colors.right, strokes.total)
-                }
-                LivePerf.work(t0)
+            compact = compact,
+            plotModifier = seek,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChartControls(
+    chart: ChartSettings,
+    onChartChange: (ChartSettings) -> Unit,
+    compact: Boolean,
+    trailing: @Composable () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SingleChoiceSegmentedButtonRow(Modifier.width(if (compact) 180.dp else 220.dp)) {
+            val windows = ChartWindow.entries
+            windows.forEachIndexed { i, w ->
+                SegmentedButton(
+                    selected = w == chart.window,
+                    onClick = { onChartChange(chart.copy(window = w)) },
+                    shape = SegmentedButtonDefaults.itemShape(i, windows.size),
+                    icon = {},
+                    colors = segmentColors(),
+                ) { Text("${w.seconds} s", maxLines = 1) }
             }
+        }
+        Spacer(Modifier.weight(1f))
+        trailing()
+    }
+}
+
+/** The three panels; [plotModifier] goes on every plot canvas (the player's seek gestures). */
+@Composable
+private fun ColumnScope.ChartPanels(
+    model: ChartModel,
+    tick: MutableIntState,
+    sensorFoot: Foot,
+    onSensorFoot: (Foot) -> Unit,
+    legend: (Foot) -> LegendEntry,
+    compact: Boolean,
+    plotModifier: Modifier = Modifier,
+) {
+    val plotter = remember { Plotter() }
+    val scheme = MaterialTheme.colorScheme
+    val sock = LocalSockColors.current
+    val colors = ChartColors(
+        left = scheme.primary,
+        right = scheme.secondary,
+        sensors = sock.series,
+        grid = scheme.outlineVariant,
+        axis = scheme.outline,
+        label = scheme.onSurfaceVariant,
+        contact = (if (sensorFoot == Foot.LEFT) scheme.primary else scheme.secondary).copy(alpha = 0.08f),
+        playhead = scheme.onSurface,
+    )
+    val measurer = rememberTextMeasurer(cacheSize = 0)
+    val baseLabel = MaterialTheme.typography.labelSmall
+    val labels = remember(measurer, baseLabel, colors.label) {
+        LabelCache(measurer, baseLabel.copy(color = colors.label, fontFeatureSettings = "tnum"))
+    }
+    val density = LocalDensity.current
+    val strokes = remember(density) { ChartStrokes(density) }
+    val names = SensorNames.Default
+    val leftLegend = legend(Foot.LEFT)
+    val rightLegend = legend(Foot.RIGHT)
+
+    val panelGap = if (compact) 6.dp else 10.dp
+    ChartPanel(
+        title = "Total load",
+        unit = "µS",
+        legend = {
+            LegendItem(leftLegend.text, colors.left, leftLegend.muted)
+            LegendItem(rightLegend.text, colors.right, rightLegend.muted)
+        },
+        modifier = Modifier.weight(1f),
+    ) {
+        Canvas(Modifier.fillMaxSize().then(plotModifier)) {
+            tick.intValue // a new frame redraws (draw phase only, no recomposition)
+            val t0 = LivePerf.start()
+            val plot = plotArea(withTimeLabels = false)
+            val scale = model.total.max
+            val span = model.frame.spanSeconds
+            drawTimeGrid(plot, span, model.endSeconds, colors)
+            val step = NiceNumbers.tickStep(scale, maxTicks(plot))
+            drawValueGrid(plot, scale, step, plotter.totalGrid.of(scale, step), colors, labels)
+            clipRect(plot.left, plot.top - 2f, plot.right, plot.bottom + 2f) {
+                val l = model.frame.left
+                val r = model.frame.right
+                plotSeries(l, l.total, plot, span, 0f, scale, plotter, colors.left, strokes.total)
+                plotSeries(r, r.total, plot, span, 0f, scale, plotter, colors.right, strokes.total)
+            }
+            drawPlayhead(model, plot, span, colors)
+            LivePerf.work(t0)
+        }
+    }
+    Spacer(Modifier.height(panelGap))
+    ChartPanel(
+        title = "Sensors",
+        unit = "µS",
+        legend = {
+            for (s in 0 until SENSOR_COUNT) LegendItem(names.short[s], colors.sensors[s])
+        },
+        action = { FootSelector(sensorFoot, onSelect = onSensorFoot) },
+        legendBelow = compact,
+        modifier = Modifier.weight(1.25f),
+    ) {
+        Canvas(Modifier.fillMaxSize().then(plotModifier)) {
+            tick.intValue
+            val t0 = LivePerf.start()
+            val plot = plotArea(withTimeLabels = false)
+            val scale = model.sensors.max
+            val w = model.frame.foot(sensorFoot)
+            val span = model.frame.spanSeconds
+            drawContact(w, plot, span, colors.contact)
+            drawTimeGrid(plot, span, model.endSeconds, colors)
+            val step = NiceNumbers.tickStep(scale, maxTicks(plot))
+            drawValueGrid(plot, scale, step, plotter.sensorGrid.of(scale, step), colors, labels)
+            clipRect(plot.left, plot.top - 2f, plot.right, plot.bottom + 2f) {
+                for (s in 0 until SENSOR_COUNT) {
+                    plotSeries(w, w.loads[s], plot, span, 0f, scale, plotter, colors.sensors[s], strokes.sensor)
+                }
+            }
+            drawPlayhead(model, plot, span, colors)
+            LivePerf.work(t0)
+        }
+    }
+    Spacer(Modifier.height(panelGap))
+    ChartPanel(
+        title = "COP heel → toe",
+        unit = null,
+        legend = {
+            LegendItem("Left", colors.left, muted = leftLegend.muted)
+            LegendItem("Right", colors.right, muted = rightLegend.muted)
+        },
+        modifier = Modifier.weight(0.9f),
+    ) {
+        Canvas(Modifier.fillMaxSize().then(plotModifier)) {
+            tick.intValue
+            val t0 = LivePerf.start()
+            val plot = plotArea(withTimeLabels = true)
+            val span = model.frame.spanSeconds
+            drawTimeGrid(plot, span, model.endSeconds, colors)
+            drawTimeLabels(plot, span, model.endSeconds, labels)
+            drawCopGrid(plot, colors, labels)
+            clipRect(plot.left, plot.top, plot.right, plot.bottom) {
+                val l = model.frame.left
+                val r = model.frame.right
+                plotSeries(l, l.copY, plot, span, -COP_RANGE, COP_RANGE, plotter, colors.left, strokes.total)
+                plotSeries(r, r.copY, plot, span, -COP_RANGE, COP_RANGE, plotter, colors.right, strokes.total)
+            }
+            drawPlayhead(model, plot, span, colors)
+            LivePerf.work(t0)
         }
     }
 }
+
+private fun DrawScope.drawPlayhead(model: ChartModel, plot: Rect, span: Float, colors: ChartColors) {
+    val at = model.playheadSeconds ?: return
+    val x = xOf(at, plot, span)
+    drawLine(colors.playhead.copy(alpha = 0.7f), Offset(x, plot.top - 2f), Offset(x, plot.bottom + 2f), 1.5f)
+}
+
+/** Left and right edge (pixels) of the plots in a chart canvas [width] wide: where the player maps taps to time. */
+internal fun plotBounds(width: Float, density: Density): Pair<Float, Float> = with(density) {
+    PlotLeft.toPx() to width - PlotRight.toPx()
+}
+
+private val PlotLeft = 40.dp
+private val PlotRight = 4.dp
 
 /** COP y axis: ± this, in insole units (the sensor rows sit at about ±0.97). */
 private const val COP_RANGE = 1.5f
@@ -457,14 +605,6 @@ private fun LegendItem(text: String, color: Color, muted: Boolean = false) {
     }
 }
 
-/** "Left", or "Left · Disconnected" while the foot does not stream. */
-@Composable
-private fun FootLegend(status: FootStatus, color: Color) {
-    val name = if (status.foot == Foot.LEFT) "Left" else "Right"
-    val streaming = status.state == LinkState.Streaming
-    LegendItem(if (streaming) name else "$name · ${status.statusText()}", color, muted = !streaming)
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FootSelector(selected: Foot, onSelect: (Foot) -> Unit) {
@@ -485,10 +625,10 @@ private fun FootSelector(selected: Foot, onSelect: (Foot) -> Unit) {
 
 /** Plot rectangle inside the canvas: room for y labels on the left and, at the bottom, the time labels. */
 private fun DrawScope.plotArea(withTimeLabels: Boolean): Rect {
-    val left = 40.dp.toPx()
+    val left = PlotLeft.toPx()
     val top = 6.dp.toPx()
     val bottom = size.height - (if (withTimeLabels) 18.dp.toPx() else 4.dp.toPx())
-    return Rect(left, top, size.width - 4.dp.toPx(), max(bottom, top + 1f))
+    return Rect(left, top, size.width - PlotRight.toPx(), max(bottom, top + 1f))
 }
 
 /** Value gridlines at least 26 dp apart: fewer of them on short plots. */
@@ -570,16 +710,26 @@ private fun DrawScope.plotSeries(
     }
 }
 
-/** Vertical lines every 1, 2 or 5 s back from now (the right edge). */
-private fun DrawScope.drawTimeGrid(plot: Rect, span: Float, colors: ChartColors) {
+/**
+ * Vertical lines every 1, 2 or 5 s: back from now (the right edge) live, at whole multiples of the step of session
+ * time ([endSeconds] at the right edge) in playback.
+ */
+private fun DrawScope.drawTimeGrid(plot: Rect, span: Float, endSeconds: Double?, colors: ChartColors) {
     val step = timeStep(span)
-    var t = 0f
+    var t = firstGridOffset(span, endSeconds)
     while (t <= span + 1e-3f) {
         val x = xOf(-t, plot, span)
         drawLine(colors.grid, Offset(x, plot.top), Offset(x, plot.bottom), 1f)
         t += step
     }
     drawLine(colors.axis, Offset(plot.left, plot.bottom), Offset(plot.right, plot.bottom), 1f)
+}
+
+/** Seconds back from the right edge to the first grid line: 0 live, to the newest whole step in playback. */
+private fun firstGridOffset(span: Float, endSeconds: Double?): Float {
+    if (endSeconds == null) return 0f
+    val step = timeStep(span).toDouble()
+    return (endSeconds - floor(endSeconds / step) * step).toFloat()
 }
 
 private fun timeStep(span: Float): Float = when {
@@ -591,11 +741,24 @@ private fun timeStep(span: Float): Float = when {
 /** "now", "−1 s" ... "−60 s": built once. */
 private val TimeTexts = Array(61) { if (it == 0) "now" else "−$it s" }
 
-private fun DrawScope.drawTimeLabels(plot: Rect, span: Float, labels: LabelCache) {
+/** Session times ("0:05") by whole second, built when first needed. UI thread only. */
+private val SessionTimeTexts = HashMap<Long, String>()
+
+private fun sessionTimeText(seconds: Long): String {
+    if (SessionTimeTexts.size > 4096) SessionTimeTexts.clear()
+    return SessionTimeTexts.getOrPut(seconds) { PlayerController.timeText(seconds * 1000.0, tenths = false) }
+}
+
+private fun DrawScope.drawTimeLabels(plot: Rect, span: Float, endSeconds: Double?, labels: LabelCache) {
     val step = timeStep(span)
-    var t = 0f
+    var t = firstGridOffset(span, endSeconds)
     while (t <= span + 1e-3f) {
-        val layout = labels.layout(TimeTexts[t.roundToInt().coerceIn(0, TimeTexts.size - 1)])
+        val text = if (endSeconds == null) {
+            TimeTexts[t.roundToInt().coerceIn(0, TimeTexts.size - 1)]
+        } else {
+            sessionTimeText((endSeconds - t).roundToLong())
+        }
+        val layout = labels.layout(text)
         val x = xOf(-t, plot, span)
         val left = (x - layout.size.width / 2f).clampTo(plot.left - 8.dp.toPx(), size.width - layout.size.width)
         drawText(layout, topLeft = Offset(left, plot.bottom + 3.dp.toPx()))

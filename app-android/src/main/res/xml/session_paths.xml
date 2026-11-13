@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Recordings shared through the FileProvider: the app's sessions folder only. -->
+<paths>
+    <external-files-path name="sessions" path="sessions/" />
+    <files-path name="sessions_internal" path="sessions/" />
+</paths>

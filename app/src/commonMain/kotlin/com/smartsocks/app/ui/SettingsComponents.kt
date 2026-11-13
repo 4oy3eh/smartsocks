@@ -105,11 +105,18 @@ internal fun <T> SegmentedChoice(
 /** One of many options, as wrapping chips. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun <T> ChipChoice(options: List<T>, selected: T, title: (T) -> String, onSelect: (T) -> Unit) {
+internal fun <T> ChipChoice(
+    options: List<T>,
+    selected: T,
+    title: (T) -> String,
+    enabled: Boolean = true,
+    onSelect: (T) -> Unit,
+) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         for (option in options) {
             FilterChip(
                 selected = option == selected,
+                enabled = enabled,
                 onClick = { onSelect(option) },
                 label = { Text(title(option)) },
                 colors = FilterChipDefaults.filterChipColors(

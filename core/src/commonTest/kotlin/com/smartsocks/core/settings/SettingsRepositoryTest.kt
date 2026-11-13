@@ -296,4 +296,22 @@ class SettingsRepositoryTest {
         }
         assertEquals(ProcessorSettings().copBeta + 20 * 4 * 500, repo.settings.value.processor.copBeta, 1e-6)
     }
+
+    @Test
+    fun `a guard vetoes part of every change`() = runTest {
+        val repo = SettingsRepository(storeWith(stored), backgroundScope)
+        repo.awaitLoaded()
+        repo.guard = { old, new -> new.copy(stream = old.stream) }
+        repo.update {
+            it.copy(
+                theme = AppTheme.LIGHT,
+                stream = it.stream.copy(rate = com.smartsocks.core.protocol.SampleRate.HZ_200),
+            )
+        }
+        assertEquals(AppTheme.LIGHT, repo.settings.value.theme, "the rest of the change applies")
+        assertEquals(stored.stream, repo.settings.value.stream, "the vetoed part does not")
+        repo.guard = null
+        repo.update { it.copy(stream = it.stream.copy(rate = com.smartsocks.core.protocol.SampleRate.HZ_200)) }
+        assertEquals(com.smartsocks.core.protocol.SampleRate.HZ_200, repo.settings.value.stream.rate)
+    }
 }

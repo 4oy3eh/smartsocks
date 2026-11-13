@@ -284,11 +284,12 @@ class SessionTimelineTest {
         assertTrue(sink.lines.last().contains(",inf,"), "open-circuit resistance is written as inf")
         assertEquals(1, CsvSessionReader.read(sink.lines).rows.size)
         for (bad in listOf("nan", "inf", "-inf")) {
-            val lines = sink.lines.dropLast(1) + (bad + "," + sink.lines.last().substringAfter(","))
+            // Followed by a good line: an error, not a last line cut short.
+            val lines = sink.lines.dropLast(1) + (bad + "," + sink.lines.last().substringAfter(",")) + sink.lines.last()
             val message = assertFailsWith<IllegalArgumentException> { SessionTimeline.read(lines) }.message
-            assertTrue(message?.startsWith("Line ${lines.size}") == true, "message: $message")
+            assertTrue(message?.startsWith("Line ${lines.size - 1}") == true, "message: $message")
         }
-        val marker = sink.lines + "# marker t_ms=nan label=x"
+        val marker = sink.lines + "# marker t_ms=nan label=x" + sink.lines.last()
         assertFailsWith<IllegalArgumentException> { CsvSessionReader.read(marker) }
     }
 

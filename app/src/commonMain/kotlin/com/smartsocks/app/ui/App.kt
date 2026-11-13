@@ -4,6 +4,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -46,9 +47,31 @@ import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveController
 import com.smartsocks.app.platform.DeviceActions
 import com.smartsocks.app.platform.DeviceCatalog
+import com.smartsocks.app.platform.SessionActions
 import com.smartsocks.app.platform.UnavailableReason
+import com.smartsocks.app.playback.SessionsController
+import com.smartsocks.app.recording.RecordingController
+import com.smartsocks.app.recording.RecordingState
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.settings.SettingsRepository
+
+/** The app's screens; the player shows the session open in [SessionsController.player]. */
+enum class AppScreen { LIVE, SETTINGS, SESSIONS, PLAYER }
+
+/** A full screen that Escape closes (desktop, hardware keyboards). */
+@Composable
+private fun EscapeCloses(onClose: () -> Unit, modifier: Modifier, content: @Composable ColumnScope.() -> Unit) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    Column(
+        modifier.focusRequester(focus).focusable().onPreviewKeyEvent {
+            val escape = it.key == Key.Escape && it.type == KeyEventType.KeyUp
+            if (escape) onClose()
+            escape
+        },
+        content = content,
+    )
+}
 
 /** Below this width the top bar puts the foot chips on their own row and the layout tightens. */
 private val CompactWidth = 600.dp
@@ -64,34 +87,64 @@ fun SmartSocksApp(
     catalog: DeviceCatalog = DeviceCatalog.SimulatorOnly,
     actions: DeviceActions = DeviceActions.None,
     startInSettings: Boolean = false,
+    recorder: RecordingController? = null,
+    sessions: SessionsController? = null,
+    sessionActions: SessionActions = SessionActions.None,
+    startScreen: AppScreen = if (startInSettings) AppScreen.SETTINGS else AppScreen.LIVE,
 ) {
     val current by settings.settings.collectAsState()
     val left by controller.left.status.collectAsState()
     val right by controller.right.status.collectAsState()
-    var showSettings by rememberSaveable { mutableStateOf(startInSettings) }
+    var screen by rememberSaveable { mutableStateOf(startScreen) }
+    val player = sessions?.player?.collectAsState()?.value
+    // The player is gone (deleted, or not restored after the process died): back to the list.
+    if (screen == AppScreen.PLAYER && player == null) screen = AppScreen.SESSIONS
+    // A session opened from elsewhere (development start option) while the list shows: play it.
+    LaunchedEffect(player) { if (player != null && screen == AppScreen.SESSIONS) screen = AppScreen.PLAYER }
     val dark = isDarkTheme(current.theme)
     val streaming = left.state == LinkState.Streaming || right.state == LinkState.Streaming
+    val playing = player?.state?.collectAsState()?.value?.playing == true
 
-    PlatformWindowEffects(darkTheme = dark, keepScreenOn = streaming)
-    PlatformBackHandler(enabled = showSettings) { showSettings = false }
+    PlatformWindowEffects(darkTheme = dark, keepScreenOn = streaming || playing)
+    PlatformBackHandler(enabled = screen != AppScreen.LIVE) {
+        screen = if (screen == AppScreen.PLAYER) AppScreen.SESSIONS else AppScreen.LIVE
+    }
+    // Leaving the player pauses it.
+    val inPlayer = screen == AppScreen.PLAYER
+    LaunchedEffect(inPlayer) { if (!inPlayer) player?.player?.pause() }
 
     SmartSocksTheme(dark) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             BoxWithConstraints(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
                 val compact = maxWidth < CompactWidth
                 Column(Modifier.fillMaxSize()) {
-                    if (showSettings) {
-                        // Escape closes the settings (desktop, hardware keyboards).
-                        val focus = remember { FocusRequester() }
-                        LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
-                        Column(
-                            Modifier.weight(1f).focusRequester(focus).focusable().onPreviewKeyEvent {
-                                val escape = it.key == Key.Escape && it.type == KeyEventType.KeyUp
-                                if (escape) showSettings = false
-                                escape
-                            },
-                        ) {
-                            SettingsTopBar(onBack = { showSettings = false })
+                    if (screen == AppScreen.PLAYER && player != null) {
+                        PlayerTopBar(player, onBack = { screen = AppScreen.SESSIONS })
+                        PlayerScreen(
+                            player,
+                            chart = current.chart,
+                            onChartChange = { chart -> settings.update { it.copy(chart = chart) } },
+                            compact = compact,
+                            onBack = { screen = AppScreen.SESSIONS },
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else if (screen == AppScreen.SESSIONS && sessions != null) {
+                        EscapeCloses(onClose = { screen = AppScreen.LIVE }, modifier = Modifier.weight(1f)) {
+                            SessionsTopBar(onBack = { screen = AppScreen.LIVE }, sessionActions)
+                            val finished = recorder?.finished?.collectAsState()?.value
+                            LaunchedEffect(finished) { sessions.refresh() }
+                            SessionsScreen(
+                                sessions,
+                                sessionActions,
+                                compact,
+                                onOpened = { screen = AppScreen.PLAYER },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    } else if (screen == AppScreen.SETTINGS) {
+                        EscapeCloses(onClose = { screen = AppScreen.LIVE }, modifier = Modifier.weight(1f)) {
+                            SettingsTopBar(onBack = { screen = AppScreen.LIVE })
+                            val recordingState = recorder?.state?.collectAsState()?.value
                             SettingsScreen(
                                 current,
                                 onChange = settings::update,
@@ -99,6 +152,7 @@ fun SmartSocksApp(
                                 catalog = catalog,
                                 actions = actions,
                                 modifier = Modifier.weight(1f),
+                                recording = recordingState != null && recordingState != RecordingState.Idle,
                             )
                         }
                     } else {
@@ -119,7 +173,12 @@ fun SmartSocksApp(
                                     else -> controller.link(status.foot).toggle()
                                 }
                             },
-                            onSettings = { showSettings = true },
+                            onSettings = { screen = AppScreen.SETTINGS },
+                            onSessions = if (sessions != null) {
+                                { screen = AppScreen.SESSIONS }
+                            } else {
+                                null
+                            },
                         )
                         DeviceNotice(left, right, actions, compact, onDismiss = { foot ->
                             controller.link(foot).disconnect()
@@ -132,6 +191,8 @@ fun SmartSocksApp(
                             onChartChange = { chart -> settings.update { it.copy(chart = chart) } },
                             compact = compact,
                             modifier = Modifier.weight(1f),
+                            recorder = recorder,
+                            onOpenRecording = { id -> sessions?.open(id) { screen = AppScreen.PLAYER } },
                         )
                     }
                 }
@@ -147,6 +208,7 @@ private fun LiveTopBar(
     compact: Boolean,
     onToggle: (FootStatus) -> Unit,
     onSettings: () -> Unit,
+    onSessions: (() -> Unit)?,
 ) {
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -160,6 +222,11 @@ private fun LiveTopBar(
                 Spacer(Modifier.width(8.dp))
                 FootChip(right, compact = false, onClick = { onToggle(right) })
                 Spacer(Modifier.width(8.dp))
+            }
+            if (onSessions != null) {
+                IconButton(onClick = onSessions) {
+                    Icon(AppIcons.Sessions, contentDescription = "Sessions")
+                }
             }
             IconButton(onClick = onSettings) {
                 Icon(AppIcons.Settings, contentDescription = "Settings")

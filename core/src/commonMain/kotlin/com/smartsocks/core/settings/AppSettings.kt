@@ -34,6 +34,9 @@ enum class ChartWindow(val seconds: Int) {
 /** The live chart's choices: its time window and the foot whose six sensors it plots. */
 data class ChartSettings(val window: ChartWindow = ChartWindow.SECONDS_10, val sensorFoot: Foot = Foot.LEFT)
 
+/** How sessions are recorded. [saveRaw]: also keep every undecoded packet in a second file, to re-process later. */
+data class RecordingSettings(val saveRaw: Boolean = true)
+
 /** Everything the app remembers between runs. Persisted by [SettingsRepository] in the [SettingsCodec] format. */
 data class AppSettings(
     val left: DeviceChoice = DeviceChoice.Simulator(),
@@ -44,6 +47,7 @@ data class AppSettings(
     val theme: AppTheme = AppTheme.SYSTEM,
     val liveView: LiveView = LiveView.COP,
     val chart: ChartSettings = ChartSettings(),
+    val recording: RecordingSettings = RecordingSettings(),
     /** Connect to the remembered devices on start. */
     val autoConnect: Boolean = true,
 ) {

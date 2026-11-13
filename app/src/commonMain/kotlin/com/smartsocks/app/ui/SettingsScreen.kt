@@ -47,6 +47,8 @@ import com.smartsocks.core.settings.AppSettings
 import com.smartsocks.core.settings.AppTheme
 import com.smartsocks.core.settings.LiveView
 
+internal const val LOCKED_WHILE_RECORDING = "Stop the recording to change this."
+
 /** From this width the settings use two columns (both feet side by side). */
 private val TwoColumnWidth = 840.dp
 
@@ -64,6 +66,8 @@ fun SettingsScreen(
     actions: DeviceActions,
     modifier: Modifier = Modifier,
     advancedExpanded: Boolean = false,
+    /** A recording runs: devices and stream settings are locked (the recording controller refuses them too). */
+    recording: Boolean = false,
 ) {
     val lists = rememberDeviceLists(catalog, actions)
     BoxWithConstraints(modifier.fillMaxSize()) {
@@ -76,9 +80,12 @@ fun SettingsScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Column(Modifier.widthIn(max = if (wide) 1160.dp else 640.dp).fillMaxWidth()) {
-                SectionHeader("Devices", "Each foot is its own independent connection.")
+                SectionHeader(
+                    "Devices",
+                    if (recording) LOCKED_WHILE_RECORDING else "Each foot is its own independent connection.",
+                )
                 BothFeet(wide, gap) { foot, m ->
-                    FootDeviceCard(foot, settings, onChange, controller, catalog, lists, actions, m)
+                    FootDeviceCard(foot, settings, onChange, controller, catalog, lists, actions, m, locked = recording)
                 }
 
                 SectionHeader("Calibration", "Sets each insole's zero point, measured with the foot unloaded.")
@@ -86,11 +93,15 @@ fun SettingsScreen(
 
                 if (wide) {
                     Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
-                        Column(Modifier.weight(1f)) { StreamSection(settings, onChange) }
+                        Column(Modifier.weight(1f)) {
+                            StreamSection(settings, onChange, recording)
+                            RecordingSection(settings, onChange)
+                        }
                         Column(Modifier.weight(1f)) { GeneralSection(settings, onChange) }
                     }
                 } else {
-                    StreamSection(settings, onChange)
+                    StreamSection(settings, onChange, recording)
+                    RecordingSection(settings, onChange)
                 }
                 ProcessingSection(settings.processor, onChange, wide, advancedExpanded)
                 if (!wide) GeneralSection(settings, onChange)
@@ -114,22 +125,39 @@ private fun BothFeet(wide: Boolean, gap: Dp, content: @Composable (Foot, Modifie
 }
 
 @Composable
-private fun StreamSection(settings: AppSettings, onChange: ((AppSettings) -> AppSettings) -> Unit) {
-    SectionHeader("Stream", "Changing these reconnects the connected socks.")
+private fun StreamSection(settings: AppSettings, onChange: ((AppSettings) -> AppSettings) -> Unit, locked: Boolean) {
+    SectionHeader(
+        "Stream",
+        if (locked) LOCKED_WHILE_RECORDING else "Changing these reconnects the connected socks.",
+    )
     SettingsCard {
         FieldLabel("Sample rate")
-        ChipChoice(SampleRate.entries, settings.stream.rate, { it.label }) { rate ->
+        ChipChoice(SampleRate.entries, settings.stream.rate, { it.label }, enabled = !locked) { rate ->
             onChange { it.copy(stream = it.stream.copy(rate = rate)) }
         }
         Spacer(Modifier.height(12.dp))
         FieldLabel("Measurement range")
-        ChipChoice(MeasurementRange.entries, settings.stream.range, { it.label }) { range ->
+        ChipChoice(MeasurementRange.entries, settings.stream.range, { it.label }, enabled = !locked) { range ->
             onChange { it.copy(stream = it.stream.copy(range = range)) }
         }
         Hint(
             "The highest sensor resistance the sock measures. A higher range also registers a light touch; a lower " +
                 "one resolves heavy load more finely, but a light touch beyond it reads as no load.",
             modifier = Modifier.padding(top = 8.dp),
+        )
+    }
+}
+
+@Composable
+private fun RecordingSection(settings: AppSettings, onChange: ((AppSettings) -> AppSettings) -> Unit) {
+    SectionHeader("Recording")
+    SettingsCard {
+        SwitchRow(
+            title = "Also save raw packets",
+            description = "A second file with every packet as received, so a session can be processed again " +
+                "later (about twice the size).",
+            checked = settings.recording.saveRaw,
+            onCheckedChange = { on -> onChange { it.copy(recording = it.recording.copy(saveRaw = on)) } },
         )
     }
 }

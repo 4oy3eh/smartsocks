@@ -1,15 +1,22 @@
 package com.smartsocks.app.platform
 
 import android.content.Context
+import com.smartsocks.app.recording.FileSessionStore
 import com.smartsocks.core.settings.DeviceChoice
 import com.smartsocks.transport.android.BluetoothAvailability
 import com.smartsocks.transport.android.BondedSocks
 import com.smartsocks.transport.android.RfcommSockTransport
 import java.io.File
 
-/** Android: settings in the app's files directory; socks over Bluetooth RFCOMM. */
-fun androidPlatform(context: Context): Platform {
+/**
+ * Android: settings in the app's files directory; recordings in its external files (`Android/data/<app>/files/
+ * sessions`, reachable over USB) or, without external storage, in its internal files; socks over Bluetooth RFCOMM.
+ * [fileProviderAuthority] shares recordings (see [AndroidSessionActions]).
+ */
+fun androidPlatform(context: Context, fileProviderAuthority: String): Platform {
     val app = context.applicationContext
+    val sessionsDir = app.getExternalFilesDir(SESSIONS_DIR) ?: File(app.filesDir, SESSIONS_DIR)
+    val sessions = FileSessionStore(sessionsDir, locationText = "the app's storage (Android/data/${app.packageName})")
     return Platform(
         settingsStore = FileSettingsStore(File(app.filesDir, "settings.txt")),
         devices = DeviceFactory.withSimulator(
@@ -25,8 +32,12 @@ fun androidPlatform(context: Context): Platform {
             }
         },
         catalog = AndroidDeviceCatalog(app),
+        sessionStore = sessions,
+        sessionActions = AndroidSessionActions(app, sessions, fileProviderAuthority),
     )
 }
+
+private const val SESSIONS_DIR = "sessions"
 
 /** Why a Bluetooth sock cannot be connected in [availability], or null if it can. */
 internal fun bluetoothProblem(availability: BluetoothAvailability): DeviceResult.Unavailable? = when (availability) {

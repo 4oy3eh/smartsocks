@@ -1,5 +1,6 @@
 package com.smartsocks.app.platform
 
+import com.smartsocks.app.recording.SessionStore
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.settings.DeviceChoice
 import com.smartsocks.core.settings.SettingsStore
@@ -10,7 +11,13 @@ import com.smartsocks.core.transport.SockTransport
 import kotlin.time.TimeSource
 
 /** Platform services, created by the launcher (desktop `main`, Android activity) and handed to the shared app. */
-class Platform(val settingsStore: SettingsStore, val devices: DeviceFactory, val catalog: DeviceCatalog)
+class Platform(
+    val settingsStore: SettingsStore,
+    val devices: DeviceFactory,
+    val catalog: DeviceCatalog,
+    val sessionStore: SessionStore,
+    val sessionActions: SessionActions = SessionActions.None,
+)
 
 /** Why a device cannot be used right now; lets the UI offer the fix. */
 enum class UnavailableReason {

@@ -24,7 +24,7 @@ class SmartSocksApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        platform = androidPlatform(this)
+        platform = androidPlatform(this, "$packageName.sessions")
         settings = SettingsRepository(platform.settingsStore, appScope)
     }
 

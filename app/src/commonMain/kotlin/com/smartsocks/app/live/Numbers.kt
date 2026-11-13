@@ -68,6 +68,8 @@ data class FootNumbers(
     val rate: String,
     val dropped: String,
     val rateMismatch: Boolean,
+    /** Replaces the link state in the header (playback), see [FootView.caption]. */
+    val caption: String? = null,
 ) {
     companion object {
         const val NONE = "–"
@@ -96,6 +98,7 @@ data class FootNumbers(
                     rate = NONE,
                     dropped = NONE,
                     rateMismatch = false,
+                    caption = view.caption,
                 )
             }
             val cop = state.cop
@@ -120,6 +123,7 @@ data class FootNumbers(
                 rate = rateText(stats ?: StreamStats(), status.rate),
                 dropped = stats?.let { bytes(it.droppedBytes) } ?: NONE,
                 rateMismatch = status.rate.rateMismatch,
+                caption = view.caption,
             )
         }
 

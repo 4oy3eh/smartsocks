@@ -63,6 +63,7 @@ object SettingsCodec {
         put("liveView", settings.liveView.name)
         put("chart.window", settings.chart.window.name)
         put("chart.sensorFoot", settings.chart.sensorFoot.name)
+        put("recording.saveRaw", settings.recording.saveRaw)
         put("autoConnect", settings.autoConnect)
         return out.toString()
     }
@@ -98,6 +99,7 @@ object SettingsCodec {
                 window = enum("chart.window", defaults.chart.window) { ChartWindow.valueOf(it) },
                 sensorFoot = enum("chart.sensorFoot", defaults.chart.sensorFoot) { Foot.valueOf(it) },
             ),
+            recording = RecordingSettings(saveRaw = boolean("recording.saveRaw", defaults.recording.saveRaw)),
             autoConnect = boolean("autoConnect", defaults.autoConnect),
         )
 

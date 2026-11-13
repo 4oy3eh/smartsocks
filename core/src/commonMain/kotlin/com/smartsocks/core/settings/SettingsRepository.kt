@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.concurrent.Volatile
 
 /**
  * The app's settings as a [StateFlow], loaded from [store] when created and saved back after changes.
@@ -77,8 +78,17 @@ class SettingsRepository(
         job.invokeOnCompletion { loadResult.complete(false) }
     }
 
-    /** Applies [transform] to the current settings and schedules a save. */
-    fun update(transform: (AppSettings) -> AppSettings) {
+    /**
+     * Vetoes part of a change: gets the settings before and after a transform and returns what may take effect
+     * (e.g. no new sample rate while a recording runs). Applied to every [update]; must be quick and not throw.
+     */
+    @Volatile
+    var guard: ((old: AppSettings, new: AppSettings) -> AppSettings)? = null
+
+    /** Applies [transform] (as far as [guard] allows) to the current settings and schedules a save. */
+    fun update(change: (AppSettings) -> AppSettings) {
+        val g = guard
+        val transform: (AppSettings) -> AppSettings = if (g == null) change else { old -> g(old, change(old)) }
         val next = snapshot.updateAndGet { s ->
             val pending = if (s.phase == Phase.LOADED) s.pending else s.pending + transform
             Snapshot(transform(s.settings), s.phase, pending)

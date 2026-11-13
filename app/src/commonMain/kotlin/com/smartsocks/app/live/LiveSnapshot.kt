@@ -31,6 +31,8 @@ class FootView(
     val state: FootState?,
     /** Oldest first. Empty while not streaming. */
     val trail: List<TrailPoint>,
+    /** Replaces the link state under the foot's name (playback: "Not recorded"). */
+    val caption: String? = null,
 ) {
     val foot: Foot get() = status.foot
 }

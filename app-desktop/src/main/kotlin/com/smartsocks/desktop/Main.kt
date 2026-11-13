@@ -13,6 +13,10 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.smartsocks.app.live.LiveController
 import com.smartsocks.app.platform.desktopPlatform
+import com.smartsocks.app.playback.SessionsController
+import com.smartsocks.app.recording.RecordingController
+import com.smartsocks.app.recording.StopReason
+import com.smartsocks.app.ui.AppScreen
 import com.smartsocks.app.ui.LivePerf
 import com.smartsocks.app.ui.SmartSocksApp
 import com.smartsocks.core.settings.LiveView
@@ -35,6 +39,19 @@ fun main() {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val settings = SettingsRepository(platform.settingsStore, scope)
     val controller = LiveController(settings, platform.devices, scope)
+    val recorder = RecordingController(controller, platform.sessionStore, settings, scope, Dispatchers.IO)
+    // The player runs on the UI thread (it is not thread-safe); file access on IO.
+    val uiThreadScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    val sessions = SessionsController(
+        platform.sessionStore,
+        uiThreadScope,
+        Dispatchers.IO,
+        activeRecording = recorder.activeRecording,
+    )
+    // Development aid: open this recording (its name) in the player and play it, e.g. to measure playback.
+    val playOnStart = System.getenv("SMARTSOCKS_PLAY")
+    // Development aid: record this many seconds once a foot streams, with a mark halfway.
+    val recordSeconds = System.getenv("SMARTSOCKS_RECORD_SECONDS")?.toLongOrNull()
     // Development aid: open straight into the settings (for screenshots without input automation).
     val startInSettings = System.getenv("SMARTSOCKS_START_IN_SETTINGS") == "1"
     // Development aid: switch the live view ("cop", "chart", "numbers"); remembered like a choice in the UI.
@@ -70,9 +87,16 @@ fun main() {
                     uiScope.launch {
                         coroutineScope {
                             launch { withTimeoutOrNull(FLUSH_TIMEOUT_MILLIS) { runCatching { settings.flush() } } }
-                            launch { withTimeoutOrNull(SHUTDOWN_TIMEOUT_MILLIS) { controller.shutdown() } }
+                            launch {
+                                // The recording first: it needs the sessions to flush what they still deliver.
+                                withTimeoutOrNull(SHUTDOWN_TIMEOUT_MILLIS) {
+                                    recorder.stopAndJoin(StopReason.AppClosed)
+                                }
+                                withTimeoutOrNull(SHUTDOWN_TIMEOUT_MILLIS) { controller.shutdown() }
+                            }
                         }
                         scope.cancel()
+                        uiThreadScope.cancel()
                         exitApplication()
                     }
                 }
@@ -82,7 +106,31 @@ fun main() {
             title = "SmartSocks",
         ) {
             window.minimumSize = Dimension(900, 600)
-            SmartSocksApp(settings, controller, platform.catalog, startInSettings = startInSettings)
+            if (recordSeconds != null) {
+                LaunchedEffect(Unit) {
+                    while (!recorder.start()) delay(200)
+                    delay(recordSeconds * 500)
+                    recorder.mark()
+                    delay(recordSeconds * 500)
+                    recorder.stopAndJoin()
+                }
+            }
+            var startScreen = if (startInSettings) AppScreen.SETTINGS else AppScreen.LIVE
+            if (playOnStart != null) {
+                startScreen = AppScreen.SESSIONS
+                LaunchedEffect(Unit) {
+                    sessions.open(playOnStart) { sessions.player.value?.player?.play() }
+                }
+            }
+            SmartSocksApp(
+                settings,
+                controller,
+                platform.catalog,
+                recorder = recorder,
+                sessions = sessions,
+                sessionActions = platform.sessionActions,
+                startScreen = startScreen,
+            )
         }
     }
 }

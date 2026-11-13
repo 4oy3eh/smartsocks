@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: back up and transfer the settings, never the recordings (large, and shared explicitly instead). -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="external" path="sessions/" />
+        <exclude domain="file" path="sessions/" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="external" path="sessions/" />
+        <exclude domain="file" path="sessions/" />
+    </device-transfer>
+</data-extraction-rules>

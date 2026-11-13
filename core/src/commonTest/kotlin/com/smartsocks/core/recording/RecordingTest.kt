@@ -203,7 +203,9 @@ class RecordingTest {
     fun `reader reports the line of a bad enum value`() {
         val sink = InMemoryRecordingSink()
         CsvRecorder(sink, metadata).record(state(nanos = 0))
-        val bad = sink.lines.map { if (it.contains(",LEFT,")) it.replace(",LEFT,", ",MIDDLE,") else it }
+        // Followed by a good row: an error, not a last line cut short.
+        val bad = sink.lines.map { if (it.contains(",LEFT,")) it.replace(",LEFT,", ",MIDDLE,") else it } +
+            sink.lines.last()
         val line = bad.indexOfFirst { it.contains(",MIDDLE,") } + 1
         val message = runCatching { CsvSessionReader.read(bad) }.exceptionOrNull()?.message
         assertTrue(message?.startsWith("Line $line") == true, "message: $message")
@@ -239,5 +241,51 @@ class RecordingTest {
         runCurrent()
         assertTrue(csv.closed)
         assertTrue(raw.closed)
+    }
+
+    private fun recording(rows: Int = 3): MutableList<String> {
+        val sink = InMemoryRecordingSink()
+        val recorder = CsvRecorder(sink, metadata)
+        for (i in 0 until rows) {
+            recorder.record(state(nanos = i * 10_000_000L))
+            if (i == 1) recorder.marker("Mark 1")
+        }
+        return sink.lines.toMutableList()
+    }
+
+    @Test
+    fun `a last line cut short by a crash is left out`() {
+        val lines = recording()
+        val full = lines.removeAt(lines.size - 1)
+        // Every cut of the last row: none of them may count as a sample, and none is an error.
+        for (cut in 1 until full.length) {
+            val read = CsvSessionReader.read(lines + full.substring(0, cut))
+            assertEquals(2, read.rows.size, "cut at $cut: ${full.substring(0, cut)}")
+            assertTrue(CsvSessionReader.stream(lines + full.substring(0, cut)) {}.truncatedLastLine)
+        }
+        val complete = CsvSessionReader.stream(lines + full) {}
+        assertFalse(complete.truncatedLastLine)
+        // Trailing blank lines do not hide the cut line, nor make it an error.
+        assertEquals(2, CsvSessionReader.read(lines + full.take(10) + "" + "\r").rows.size)
+    }
+
+    @Test
+    fun `a marker cut short at the end is left out too`() {
+        val lines = recording(rows = 2)
+        val read = CsvSessionReader.read(lines + "# marker t_ms=")
+        assertEquals(1, read.markers.size)
+        assertEquals(2, read.rows.size)
+    }
+
+    @Test
+    fun `a malformed line in the middle is still an error with its number`() {
+        val lines = recording()
+        val bad = lines.indexOfFirst { it.startsWith("10.000,") }
+        lines[bad] = lines[bad].take(12)
+        val message = runCatching { CsvSessionReader.read(lines) }.exceptionOrNull()?.message
+        assertTrue(message?.startsWith("Line ${bad + 1}:") == true, "message: $message")
+        val badMarker = recording().apply { set(indexOfFirst { it.startsWith("# marker") }, "# marker x") }
+        val markerMessage = runCatching { CsvSessionReader.read(badMarker) }.exceptionOrNull()?.message
+        assertTrue(markerMessage?.contains("malformed marker") == true, "message: $markerMessage")
     }
 }

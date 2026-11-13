@@ -27,6 +27,7 @@ class SettingsCodecTest {
         theme = AppTheme.DARK,
         liveView = LiveView.NUMBERS,
         chart = ChartSettings(ChartWindow.SECONDS_30, Foot.RIGHT),
+        recording = RecordingSettings(saveRaw = false),
         autoConnect = false,
     )
 
@@ -45,6 +46,7 @@ class SettingsCodecTest {
         assertEquals(LiveView.COP, d.liveView)
         assertEquals(ChartSettings(ChartWindow.SECONDS_10, Foot.LEFT), d.chart)
         assertTrue(d.autoConnect)
+        assertTrue(d.recording.saveRaw)
     }
 
     @Test

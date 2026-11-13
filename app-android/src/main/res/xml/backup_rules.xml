@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Up to Android 11: back up the settings, never the recordings. -->
+<full-backup-content>
+    <exclude domain="external" path="sessions/" />
+    <exclude domain="file" path="sessions/" />
+</full-backup-content>

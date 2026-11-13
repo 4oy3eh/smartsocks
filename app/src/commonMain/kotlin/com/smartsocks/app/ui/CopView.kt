@@ -219,8 +219,11 @@ private fun DrawScope.drawFootLabel(
     val width = m.units(1.5f).toInt().coerceAtLeast(1)
     val name = if (view.foot == Foot.LEFT) "Left" else "Right"
     val state = view.status.state
-    val (detail, color) = when (state) {
-        LinkState.Streaming ->
+    val caption = view.caption
+    val (detail, color) = when {
+        caption != null -> caption to muted
+
+        state == LinkState.Streaming ->
             (if (view.state?.inContact == false) "In the air" else view.status.deviceName ?: "Streaming") to muted
 
         else -> state.label() to colors.forState(state)

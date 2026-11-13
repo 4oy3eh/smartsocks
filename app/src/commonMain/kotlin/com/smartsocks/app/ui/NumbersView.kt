@@ -47,15 +47,7 @@ import kotlinx.coroutines.flow.conflate
 /** How often the numbers change at most: fast enough to follow a step, slow enough to read. */
 private const val NUMBERS_PERIOD_MILLIS = 100L
 
-private fun numbersOf(controller: LiveController, s: LiveSnapshot): Pair<FootNumbers, FootNumbers> = Pair(
-    FootNumbers.of(s.left, controller.left.session.value?.stats?.value, s.balance?.left),
-    FootNumbers.of(s.right, controller.right.session.value?.stats?.value, s.balance?.right),
-)
-
-/**
- * Every value of both feet as a table: per sensor resistance, load and share; then the foot's totals and link
- * statistics. Updated at most every [NUMBERS_PERIOD_MILLIS] (the newest frame wins), not with every frame.
- */
+/** The live numbers: link statistics from the controller's sessions. */
 @Composable
 fun NumbersView(
     controller: LiveController,
@@ -63,9 +55,30 @@ fun NumbersView(
     compact: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val numbers by produceState(numbersOf(controller, snapshot.value), controller) {
+    NumbersView(snapshot, compact, modifier, key = controller) { s ->
+        Pair(
+            FootNumbers.of(s.left, controller.left.session.value?.stats?.value, s.balance?.left),
+            FootNumbers.of(s.right, controller.right.session.value?.stats?.value, s.balance?.right),
+        )
+    }
+}
+
+/**
+ * Every value of both feet as a table: per sensor resistance, load and share; then the foot's totals and link
+ * statistics. [numbersOf] formats a snapshot (live or playback); updated at most every [NUMBERS_PERIOD_MILLIS] (the
+ * newest frame wins), not with every frame.
+ */
+@Composable
+fun NumbersView(
+    snapshot: State<LiveSnapshot>,
+    compact: Boolean,
+    modifier: Modifier = Modifier,
+    key: Any? = null,
+    numbersOf: (LiveSnapshot) -> Pair<FootNumbers, FootNumbers>,
+) {
+    val numbers by produceState(numbersOf(snapshot.value), key) {
         snapshotFlow { snapshot.value }.conflate().collect {
-            value = numbersOf(controller, it)
+            value = numbersOf(it)
             delay(NUMBERS_PERIOD_MILLIS)
         }
     }
@@ -114,12 +127,13 @@ private fun FootTable(n: FootNumbers, compact: Boolean, modifier: Modifier = Mod
                 Spacer(Modifier.width(12.dp))
                 val state = n.status.state
                 val dot = if (state == LinkState.Streaming && n.rateMismatch) sock.busy else sock.forState(state)
-                Box(Modifier.size(8.dp).background(dot, CircleShape))
+                Box(Modifier.size(8.dp).background(if (n.caption != null) sock.idle else dot, CircleShape))
                 Spacer(Modifier.width(6.dp))
+                val streaming = state == LinkState.Streaming
                 Text(
-                    if (state == LinkState.Streaming) n.status.deviceName ?: "Streaming" else state.label(),
+                    n.caption ?: if (streaming) n.status.deviceName ?: "Streaming" else state.label(),
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (state == LinkState.Streaming) colors.onSurfaceVariant else sock.forState(state),
+                    color = if (streaming || n.caption != null) colors.onSurfaceVariant else sock.forState(state),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),

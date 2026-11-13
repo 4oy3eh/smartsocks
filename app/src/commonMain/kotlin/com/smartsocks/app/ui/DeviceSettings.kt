@@ -119,6 +119,8 @@ internal fun FootDeviceCard(
     lists: DeviceLists,
     actions: DeviceActions,
     modifier: Modifier = Modifier,
+    /** A recording runs: the device cannot change (connecting and disconnecting still can). */
+    locked: Boolean = false,
 ) {
     val link = controller.link(foot)
     val status by link.status.collectAsState()
@@ -145,6 +147,12 @@ internal fun FootDeviceCard(
             }
         }
 
+        if (locked) {
+            FieldLabel("Device")
+            Text(current.shortTitle.replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodyLarge)
+            Hint(LOCKED_WHILE_RECORDING, modifier = Modifier.padding(top = 4.dp))
+            return@SettingsCard
+        }
         FieldLabel("Device")
         SegmentedChoice(
             options = kinds,

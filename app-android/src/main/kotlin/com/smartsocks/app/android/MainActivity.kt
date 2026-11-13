@@ -7,6 +7,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import com.smartsocks.app.recording.StopReason
 import com.smartsocks.app.ui.ChartRendering
 import com.smartsocks.app.ui.LivePerf
 import com.smartsocks.app.ui.SmartSocksApp
@@ -20,10 +21,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        val catalog = (application as SmartSocksApplication).platform.catalog
+        val platform = (application as SmartSocksApplication).platform
+        val catalog = platform.catalog
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) applyDebugExtras()
         setContent {
-            SmartSocksApp(model.settings, model.controller, catalog, deviceActions)
+            SmartSocksApp(
+                model.settings,
+                model.controller,
+                catalog,
+                deviceActions,
+                recorder = model.recorder,
+                sessions = model.sessions,
+                sessionActions = platform.sessionActions,
+            )
         }
     }
 
@@ -65,7 +75,13 @@ class MainActivity : ComponentActivity() {
         // Since Android 12 Back keeps the root activity (and so the ViewModel) alive: without this the socks
         // would stream in the background forever. A configuration change restarts the activity at once: keep
         // the links up across it.
-        if (!isChangingConfigurations) model.controller.setPaused(true)
+        if (!isChangingConfigurations) {
+            // Recording does not continue in the background (that would need a foreground service): finalize the
+            // file now; the live screen says why it stopped.
+            model.recorder.stop(StopReason.Background)
+            model.sessions.player.value?.player?.pause()
+            model.controller.setPaused(true)
+        }
         (application as SmartSocksApplication).flushSettings()
     }
 }

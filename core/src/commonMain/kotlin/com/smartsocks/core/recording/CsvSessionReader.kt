@@ -23,8 +23,15 @@ data class CsvMarker(val tMillis: Double, val label: String)
 /** [header] holds the `# key=value` lines (without the marker lines). */
 class RecordedSession(val header: Map<String, String>, val rows: List<CsvRow>, val markers: List<CsvMarker>)
 
-/** Everything of a recording except its rows, for [CsvSessionReader.stream]. */
-class CsvSessionInfo(val header: Map<String, String>, val markers: List<CsvMarker>)
+/**
+ * Everything of a recording except its rows, for [CsvSessionReader.stream]. [truncatedLastLine]: the file ended in
+ * the middle of a line (a crash, or a recording still being written), which was left out.
+ */
+class CsvSessionInfo(
+    val header: Map<String, String>,
+    val markers: List<CsvMarker>,
+    val truncatedLastLine: Boolean = false,
+)
 
 /** Reads what [CsvRecorder] wrote, in format version 2 and the older version 1 (`calibrated` 1/0 as the baseline). */
 object CsvSessionReader {
@@ -42,6 +49,10 @@ object CsvSessionReader {
      * Hands every row to [onRow] as soon as it is parsed, in file order, without keeping it: an hour at 200 Hz is
      * 1.4 million rows. [lines] are consumed once (e.g. a file's line sequence); blocking I/O, so call it off the
      * main thread.
+     *
+     * A malformed row or marker that is the **last** line is dropped ([CsvSessionInfo.truncatedLastLine]): a
+     * recording cut short by a crash, or still being written, ends in the middle of a line. Anywhere else it is an
+     * error.
      * @throws IllegalArgumentException as [read]; rows before the bad line have been delivered already.
      */
     fun stream(lines: Iterable<String>, onRow: (CsvRow) -> Unit): CsvSessionInfo {
@@ -49,13 +60,19 @@ object CsvSessionReader {
         val markers = mutableListOf<CsvMarker>()
         var sawColumns = false
         var version = 0
+        // A bad line is only an error once another line follows it.
+        var pendingError: IllegalArgumentException? = null
 
         for ((index, raw) in lines.withIndex()) {
             val line = raw.trimEnd('\r')
+            if (line.isBlank()) continue
+            pendingError?.let { throw it }
             when {
-                line.isBlank() -> Unit
-
-                line.startsWith(MARKER_PREFIX) -> markers += parseMarker(line, index)
+                line.startsWith(MARKER_PREFIX) -> try {
+                    markers += parseMarker(line, index)
+                } catch (e: IllegalArgumentException) {
+                    pendingError = e
+                }
 
                 line.startsWith("#") -> {
                     val body = line.removePrefix("#").trim()
@@ -70,17 +87,19 @@ object CsvSessionReader {
                     sawColumns = true
                 }
 
-                else -> onRow(
-                    try {
+                else -> {
+                    val row = try {
                         parseRow(line, version)
                     } catch (e: IllegalArgumentException) {
-                        throw IllegalArgumentException("Line ${index + 1}: ${e.message}", e)
-                    },
-                )
+                        pendingError = IllegalArgumentException("Line ${index + 1}: ${e.message}", e)
+                        null
+                    }
+                    if (row != null) onRow(row)
+                }
             }
         }
         checkVersion(header)
-        return CsvSessionInfo(header, markers)
+        return CsvSessionInfo(header, markers, truncatedLastLine = pendingError != null)
     }
 
     private fun checkVersion(header: Map<String, String>): Int {

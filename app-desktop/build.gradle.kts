@@ -42,3 +42,11 @@ tasks.register<JavaExec>("renderScreens") {
     mainClass = "com.smartsocks.desktop.tools.RenderScreensKt"
     args(layout.buildDirectory.dir("screens").get().asFile.absolutePath)
 }
+
+tasks.register<JavaExec>("playbackBench") {
+    group = "application"
+    description = "Writes a simulated 10-minute 200 Hz two-foot recording and measures opening it. Development tool."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "com.smartsocks.desktop.tools.PlaybackBenchKt"
+    maxHeapSize = "1g"
+}

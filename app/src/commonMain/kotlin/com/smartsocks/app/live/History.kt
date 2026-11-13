@@ -2,6 +2,8 @@ package com.smartsocks.app.live
 
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.playback.FootTrack
+import com.smartsocks.core.playback.SessionTimeline
 import com.smartsocks.core.protocol.SENSOR_COUNT
 import kotlin.concurrent.Volatile
 import kotlin.math.max
@@ -239,6 +241,41 @@ class HistoryWindow(val capacity: Int) {
         truncated = incomplete || lost
     }
 
+    /**
+     * Copies the recorded samples of [track] in (`endMillis - spanMillis`, `endMillis`], plus the one just before,
+     * with times in seconds relative to [endMillis] (so the chart draws them exactly like live data). A gap longer
+     * than [maxGapMillis] (the link was down) breaks the line. With more samples than [capacity] every k-th is
+     * taken. Nothing is allocated.
+     */
+    fun copy(track: FootTrack, endMillis: Double, spanMillis: Double, maxGapMillis: Double) {
+        clear()
+        if (track.isEmpty()) return
+        val from = endMillis - spanMillis
+        val inside = track.range(from, endMillis)
+        if (inside.isEmpty()) return
+        val start = if (inside.first > 0) inside.first - 1 else inside.first
+        val end = inside.last + 1
+        val stride = (end - start + capacity - 1) / capacity
+        var n = 0
+        var k = start
+        var previous = Double.NaN
+        while (k < end && n < capacity) {
+            val time = track.timeAt(k)
+            t[n] = ((time - endMillis) / 1000).toFloat()
+            total[n] = track.totalLoadAt(k).toFloat()
+            for (s in 0 until SENSOR_COUNT) loads[s][n] = track.loadAt(k, s).toFloat()
+            copX[n] = track.copXAt(k).toFloat()
+            copY[n] = track.copYAt(k).toFloat()
+            contact[n] = track.inContactAt(k)
+            breaks[n] = n == 0 || time - previous > maxGapMillis * stride
+            previous = time
+            n++
+            k += stride
+        }
+        size = n
+        firstInside = if (n > 0 && t[0] < -spanMillis / 1000) 1 else 0
+    }
+
     fun clear() {
         size = 0
         firstInside = 0
@@ -298,6 +335,15 @@ class ChartFrame(capacity: Int = FootHistory.DEFAULT_CAPACITY / 2) {
 
     /** Largest total load of either foot; NaN when neither has data (a foot without data never hides the other). */
     fun maxTotal(): Float = maxOrNaN(left.maxTotal(), right.maxTotal())
+
+    /** A window of [timeline] ending at session time [endMillis]: what the player's chart draws. */
+    fun update(timeline: SessionTimeline, endMillis: Double, spanSeconds: Int) {
+        this.nowNanos = 0
+        this.spanSeconds = spanSeconds.toFloat()
+        val span = spanSeconds * 1000.0
+        left.copy(timeline.track(Foot.LEFT), endMillis, span, timeline.staleAfterMillis(Foot.LEFT))
+        right.copy(timeline.track(Foot.RIGHT), endMillis, span, timeline.staleAfterMillis(Foot.RIGHT))
+    }
 
     fun update(history: LiveHistory, nowNanos: Long, spanSeconds: Int) {
         this.nowNanos = nowNanos

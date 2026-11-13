@@ -6,6 +6,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
 import kotlin.math.PI
@@ -108,5 +109,172 @@ object AppIcons {
                 close()
             }
         }.build()
+    }
+
+    /** A filled dot: record. */
+    val Record: ImageVector by lazy {
+        icon("Record") {
+            path(fill = SolidColor(Color.Black)) { circle(12f, 12f, 6.5f) }
+        }
+    }
+
+    /** A filled square: stop. */
+    val Stop: ImageVector by lazy {
+        icon("Stop") { path(fill = SolidColor(Color.Black)) { rect(6.5f, 6.5f, 17.5f, 17.5f) } }
+    }
+
+    /** A flag on a pole: a marker. */
+    val Flag: ImageVector by lazy {
+        icon("Flag") {
+            stroked {
+                moveTo(6f, 21f)
+                lineTo(6f, 4f)
+            }
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(6f, 4f)
+                lineTo(18f, 4f)
+                lineTo(15f, 8f)
+                lineTo(18f, 12f)
+                lineTo(6f, 12f)
+                close()
+            }
+        }
+    }
+
+    /** Three lines with bullets: the sessions list. */
+    val Sessions: ImageVector by lazy {
+        icon("Sessions") {
+            path(fill = SolidColor(Color.Black)) {
+                circle(5f, 6.5f, 1.6f)
+                circle(5f, 12f, 1.6f)
+                circle(5f, 17.5f, 1.6f)
+            }
+            stroked {
+                moveTo(9.5f, 6.5f)
+                lineTo(20f, 6.5f)
+                moveTo(9.5f, 12f)
+                lineTo(20f, 12f)
+                moveTo(9.5f, 17.5f)
+                lineTo(20f, 17.5f)
+            }
+        }
+    }
+
+    /** A bar and a triangle pointing left: one frame back. */
+    val FrameBack: ImageVector by lazy { frame(back = true) }
+
+    val FrameForward: ImageVector by lazy { frame(back = false) }
+
+    /** Two triangles and a bar: previous step (heel strike). */
+    val StepBack: ImageVector by lazy { skip(back = true) }
+
+    val StepForward: ImageVector by lazy { skip(back = false) }
+
+    val Folder: ImageVector by lazy {
+        icon("Folder") {
+            stroked {
+                moveTo(3.5f, 7f)
+                lineTo(3.5f, 18.5f)
+                lineTo(20.5f, 18.5f)
+                lineTo(20.5f, 8.5f)
+                lineTo(11.5f, 8.5f)
+                lineTo(9.5f, 5.5f)
+                lineTo(3.5f, 5.5f)
+                close()
+            }
+        }
+    }
+
+    /** Three connected dots. */
+    val Share: ImageVector by lazy {
+        icon("Share") {
+            path(fill = SolidColor(Color.Black)) {
+                circle(17.5f, 5.5f, 2.5f)
+                circle(6.5f, 12f, 2.5f)
+                circle(17.5f, 18.5f, 2.5f)
+            }
+            stroked {
+                moveTo(17.5f, 5.5f)
+                lineTo(6.5f, 12f)
+                lineTo(17.5f, 18.5f)
+            }
+        }
+    }
+
+    /** Three vertical dots: more actions. */
+    val More: ImageVector by lazy {
+        icon("More") {
+            path(fill = SolidColor(Color.Black)) {
+                circle(12f, 5.5f, 1.8f)
+                circle(12f, 12f, 1.8f)
+                circle(12f, 18.5f, 1.8f)
+            }
+        }
+    }
+
+    val Close: ImageVector by lazy {
+        icon("Close") {
+            stroked {
+                moveTo(6f, 6f)
+                lineTo(18f, 18f)
+                moveTo(18f, 6f)
+                lineTo(6f, 18f)
+            }
+        }
+    }
+
+    private fun frame(back: Boolean): ImageVector = icon(if (back) "FrameBack" else "FrameForward") {
+        val m = if (back) -1f else 1f
+        path(fill = SolidColor(Color.Black)) {
+            // Triangle towards the bar.
+            moveTo(12f - 5f * m, 6f)
+            lineTo(12f + 3f * m, 12f)
+            lineTo(12f - 5f * m, 18f)
+            close()
+            rect(minOf(12f + 4f * m, 12f + 6f * m), 6f, maxOf(12f + 4f * m, 12f + 6f * m), 18f)
+        }
+    }
+
+    private fun skip(back: Boolean): ImageVector = icon(if (back) "StepBack" else "StepForward") {
+        val m = if (back) -1f else 1f
+        path(fill = SolidColor(Color.Black)) {
+            moveTo(12f - 8f * m, 6f)
+            lineTo(12f - 1f * m, 12f)
+            lineTo(12f - 8f * m, 18f)
+            close()
+            moveTo(12f - 1f * m, 6f)
+            lineTo(12f + 6f * m, 12f)
+            lineTo(12f - 1f * m, 18f)
+            close()
+            rect(minOf(12f + 6.5f * m, 12f + 8.5f * m), 6f, maxOf(12f + 6.5f * m, 12f + 8.5f * m), 18f)
+        }
+    }
+
+    private fun icon(name: String, build: ImageVector.Builder.() -> Unit): ImageVector =
+        ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f).apply(build).build()
+
+    private fun ImageVector.Builder.stroked(block: PathBuilder.() -> Unit) {
+        path(
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 2f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round,
+            pathBuilder = block,
+        )
+    }
+
+    private fun PathBuilder.circle(cx: Float, cy: Float, r: Float) {
+        moveTo(cx + r, cy)
+        arcTo(r, r, 0f, isMoreThanHalf = true, isPositiveArc = false, cx - r, cy)
+        arcTo(r, r, 0f, isMoreThanHalf = true, isPositiveArc = false, cx + r, cy)
+        close()
+    }
+
+    private fun PathBuilder.rect(l: Float, t: Float, r: Float, b: Float) {
+        moveTo(l, t)
+        lineTo(r, t)
+        lineTo(r, b)
+        lineTo(l, b)
+        close()
     }
 }

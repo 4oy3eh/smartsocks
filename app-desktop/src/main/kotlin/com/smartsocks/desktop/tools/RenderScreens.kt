@@ -20,6 +20,12 @@ import com.smartsocks.app.platform.DeviceResult
 import com.smartsocks.app.platform.SerialPortEntry
 import com.smartsocks.app.platform.UnavailableReason
 import com.smartsocks.app.platform.desktopPlatform
+import com.smartsocks.app.playback.SessionsController
+import com.smartsocks.app.playback.loadSession
+import com.smartsocks.app.recording.FileSessionStore
+import com.smartsocks.app.recording.RecordingController
+import com.smartsocks.app.recording.SessionSummary
+import com.smartsocks.app.ui.AppScreen
 import com.smartsocks.app.ui.SettingsScreen
 import com.smartsocks.app.ui.SmartSocksApp
 import com.smartsocks.app.ui.SmartSocksTheme
@@ -37,8 +43,10 @@ import com.smartsocks.core.settings.LiveView
 import com.smartsocks.core.settings.SettingsCodec
 import com.smartsocks.core.settings.SettingsRepository
 import com.smartsocks.core.sim.SimMode
+import com.smartsocks.core.sim.SimulatedRecording
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -48,9 +56,23 @@ import kotlinx.coroutines.runBlocking
 import org.jetbrains.skia.EncodedImageFormat
 import java.io.File
 import java.nio.file.Files
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
 
-/** How the case is shown: the whole app (live or settings), or the settings screen alone with Advanced open. */
-private enum class Screen { LIVE, SETTINGS, SETTINGS_EXPANDED }
+/**
+ * How the case is shown: the whole app (live, settings, sessions list, player), or the settings screen alone with
+ * Advanced open. SESSIONS_EMPTY: the list without recordings.
+ */
+private enum class Screen { LIVE, SETTINGS, SETTINGS_EXPANDED, SESSIONS, SESSIONS_EMPTY, PLAYER }
+
+/** What the player shows: the demo session at [atSeconds] in [view], with an A–B loop and speed if given. */
+private class PlayerSetup(
+    val view: LiveView,
+    val atSeconds: Double,
+    val loop: Pair<Double, Double>? = null,
+    val speed: Double = 1.0,
+    val pendingA: Double? = null,
+)
 
 private class Case(
     val name: String,
@@ -69,6 +91,9 @@ private class Case(
     val warmupFrames: Int = 150,
     /** Text scale on top of [density] (accessibility setting). */
     val fontScale: Float = 1f,
+    /** Start recording after a third of the warm-up, add a marker after two thirds. */
+    val record: Boolean = false,
+    val player: PlayerSetup? = null,
 )
 
 private class PreviewActions(blocked: Boolean) : DeviceActions {
@@ -109,7 +134,138 @@ private val tuned = ProcessorSettings(contactOnThreshold = 35.0, contactOffThres
 private val chart200 = AppSettings(liveView = LiveView.CHART, stream = StreamSettings(SampleRate.HZ_200))
 private val numbers = AppSettings(liveView = LiveView.NUMBERS)
 
+private val loop = 10.0 to 13.6
+
 private val cases = listOf(
+    // Recording on the live screen.
+    Case("live-recording-desktop-light", 1120, 760, 1f, AppTheme.LIGHT, record = true, warmupFrames = 240),
+    Case(
+        "live-recording-phone-dark",
+        360,
+        780,
+        2.5f,
+        AppTheme.DARK,
+        settings = chart200,
+        record = true,
+        warmupFrames = 240,
+    ),
+    Case(
+        "live-not-streaming-desktop-light",
+        1120,
+        760,
+        1f,
+        AppTheme.LIGHT,
+        settings = AppSettings(autoConnect = false),
+        warmupFrames = 20,
+    ),
+    // Sessions list.
+    Case("sessions-desktop-light", 1120, 760, 1f, AppTheme.LIGHT, Screen.SESSIONS, warmupFrames = 20),
+    Case("sessions-desktop-dark", 1120, 760, 1f, AppTheme.DARK, Screen.SESSIONS, warmupFrames = 20),
+    Case("sessions-phone-light", 360, 780, 2.5f, AppTheme.LIGHT, Screen.SESSIONS, warmupFrames = 20),
+    Case("sessions-empty-desktop-dark", 1120, 760, 1f, AppTheme.DARK, Screen.SESSIONS_EMPTY, warmupFrames = 20),
+    Case("sessions-empty-phone-light", 360, 780, 2.5f, AppTheme.LIGHT, Screen.SESSIONS_EMPTY, warmupFrames = 20),
+    // Player on the demo session (60 s, both feet, 200 Hz, two markers).
+    Case(
+        "player-cop-desktop-light",
+        1120,
+        760,
+        1f,
+        AppTheme.LIGHT,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.COP, 12.33, loop = loop, speed = 0.25),
+    ),
+    Case(
+        "player-cop-desktop-dark",
+        1120,
+        760,
+        1f,
+        AppTheme.DARK,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.COP, 31.0),
+    ),
+    Case(
+        "player-chart-desktop-light",
+        1120,
+        760,
+        1f,
+        AppTheme.LIGHT,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.CHART, 12.33, loop = loop),
+    ),
+    Case(
+        "player-chart-desktop-dark",
+        1120,
+        760,
+        1f,
+        AppTheme.DARK,
+        Screen.PLAYER,
+        settings = AppSettings(chart = ChartSettings(ChartWindow.SECONDS_5, Foot.RIGHT)),
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.CHART, 41.0, pendingA = 40.0),
+    ),
+    Case(
+        "player-numbers-desktop-light",
+        1120,
+        760,
+        1f,
+        AppTheme.LIGHT,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.NUMBERS, 12.33),
+    ),
+    Case(
+        "player-desktop-min",
+        900,
+        600,
+        1f,
+        AppTheme.LIGHT,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.COP, 12.33, loop = loop),
+    ),
+    Case(
+        "player-cop-phone-light",
+        360,
+        780,
+        2.5f,
+        AppTheme.LIGHT,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.COP, 12.33, loop = loop, speed = 0.5),
+    ),
+    Case(
+        "player-chart-phone-dark",
+        360,
+        780,
+        2.5f,
+        AppTheme.DARK,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.CHART, 12.33, loop = loop),
+    ),
+    Case(
+        "player-numbers-phone-dark",
+        360,
+        780,
+        2.5f,
+        AppTheme.DARK,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.NUMBERS, 12.33),
+    ),
+    Case(
+        "player-cop-phone-landscape",
+        780,
+        360,
+        2.5f,
+        AppTheme.DARK,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.COP, 12.33, loop = loop),
+    ),
     // Chart and numbers views: both feet at 200 Hz for about 7 s so that a 5 or 10 s window is full.
     Case("chart-desktop-light", 1120, 760, 1f, AppTheme.LIGHT, settings = chart200, warmupFrames = 420),
     Case(
@@ -309,13 +465,23 @@ private val cases = listOf(
 fun main(args: Array<String>) {
     val out = File(args.getOrElse(0) { "build/screens" }).apply { mkdirs() }
     val settingsDir = Files.createTempDirectory("smartsocks-render").toFile()
+    val demoDir = File(settingsDir, "sessions")
+    val emptyDir = File(settingsDir, "empty")
+    writeDemoSessions(demoDir)
     val only = args.drop(1).toSet()
     runBlocking {
         for (case in cases.filter { only.isEmpty() || it.name in only }) {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             val store = InMemorySettingsStore(SettingsCodec.encode(case.settings.copy(theme = case.theme)))
             val settings = SettingsRepository(store, scope)
-            val desktop = desktopPlatform(File(settingsDir, "unused.txt"), case.catalog).devices
+            // Recordings of a case go to a scratch folder, so the demo list stays the same for every case.
+            val sessionsDir = when {
+                case.screen == Screen.SESSIONS_EMPTY -> emptyDir
+                case.record -> File(settingsDir, "recorded-${case.name}")
+                else -> demoDir
+            }
+            val platform = desktopPlatform(File(settingsDir, "unused.txt"), case.catalog, sessionsDir)
+            val desktop = platform.devices
             val devices = DeviceFactory { foot: Foot, choice: DeviceChoice ->
                 if (choice is DeviceChoice.Bluetooth &&
                     case.bluetooth != null
@@ -326,41 +492,77 @@ fun main(args: Array<String>) {
                 }
             }
             val controller = LiveController(settings, devices, scope)
+            val recorder = RecordingController(controller, platform.sessionStore, settings, scope, Dispatchers.IO)
+            // The player lives on this (single) thread, like the UI thread of the app.
+            // A child of this (single) thread's scope, cancelled after the case.
+            val uiScope = CoroutineScope(coroutineContext + Job(coroutineContext[Job]))
+            val sessions = SessionsController(
+                platform.sessionStore,
+                uiScope,
+                Dispatchers.IO,
+                activeRecording = recorder.activeRecording,
+            )
+            case.player?.let { setup ->
+                val demo = platform.sessionStore.list().first { it.id == DEMO_ID }
+                val player = sessions.show(loadSession(platform.sessionStore, demo))
+                player.setView(setup.view)
+                player.setSpeed(setup.speed)
+                setup.loop?.let { (a, b) ->
+                    player.seek(a * 1000)
+                    player.setLoopStart()
+                    player.seek(b * 1000)
+                    player.setLoopEnd()
+                }
+                setup.pendingA?.let {
+                    player.seek(it * 1000)
+                    player.setLoopStart()
+                }
+                player.seek(setup.atSeconds * 1000)
+            }
+            val startScreen = when (case.screen) {
+                Screen.SETTINGS -> AppScreen.SETTINGS
+                Screen.SESSIONS, Screen.SESSIONS_EMPTY -> AppScreen.SESSIONS
+                Screen.PLAYER -> AppScreen.PLAYER
+                else -> AppScreen.LIVE
+            }
             val scene = ImageComposeScene(
                 width = (case.widthDp * case.density).toInt(),
                 height = (case.heightDp * case.density).toInt(),
                 density = Density(case.density, case.fontScale),
             ) {
-                when (case.screen) {
-                    Screen.LIVE, Screen.SETTINGS -> SmartSocksApp(
+                if (case.screen == Screen.SETTINGS_EXPANDED) {
+                    val current by settings.settings.collectAsState()
+                    SmartSocksTheme(current.theme == AppTheme.DARK) {
+                        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                            SettingsScreen(
+                                current,
+                                settings::update,
+                                controller,
+                                case.catalog,
+                                PreviewActions(case.permissionBlocked),
+                                advancedExpanded = true,
+                            )
+                        }
+                    }
+                } else {
+                    SmartSocksApp(
                         settings,
                         controller,
                         case.catalog,
                         PreviewActions(case.permissionBlocked),
-                        startInSettings = case.screen == Screen.SETTINGS,
+                        recorder = recorder,
+                        sessions = sessions,
+                        sessionActions = platform.sessionActions,
+                        startScreen = startScreen,
                     )
-
-                    Screen.SETTINGS_EXPANDED -> {
-                        val current by settings.settings.collectAsState()
-                        SmartSocksTheme(current.theme == AppTheme.DARK) {
-                            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                                SettingsScreen(
-                                    current,
-                                    settings::update,
-                                    controller,
-                                    case.catalog,
-                                    PreviewActions(case.permissionBlocked),
-                                    advancedExpanded = true,
-                                )
-                            }
-                        }
-                    }
                 }
             }
             val start = System.nanoTime()
             // ~2.5 s of frames (by default) so that both feet stream and the COP trails fill.
             var renderNanos = 0L
-            repeat(case.warmupFrames) {
+            repeat(case.warmupFrames) { frame ->
+                if (case.record && frame == case.warmupFrames / 3) recorder.start()
+                if (case.record && frame == case.warmupFrames * 2 / 3) recorder.mark()
                 val t0 = System.nanoTime()
                 scene.render(t0 - start)
                 renderNanos += System.nanoTime() - t0
@@ -372,9 +574,41 @@ fun main(args: Array<String>) {
             file.writeBytes(requireNotNull(image.encodeToData(EncodedImageFormat.PNG)).bytes)
             println("wrote $file (off-screen render avg $avgMillis ms/frame)")
             scene.close()
+            recorder.stopAndJoin()
+            sessions.closePlayer()
+            uiScope.cancel()
             controller.shutdown()
             scope.cancel()
         }
     }
     settingsDir.deleteRecursively()
+}
+
+private const val DEMO_ID = "2026-11-13_14-05-22"
+
+/** A 60 s walk of both feet at 200 Hz with two markers, and two shorter recordings, made by the simulator. */
+private fun writeDemoSessions(dir: File) {
+    var time = OffsetDateTime.of(2026, 11, 13, 9, 30, 4, 0, ZoneOffset.ofHours(1))
+    val store = FileSessionStore(dir, now = { time })
+    fun demo(seconds: Double, feet: Set<Foot>, rate: SampleRate, markers: List<Pair<Double, String>>, raw: Boolean) {
+        val rec = store.create(saveRaw = raw)
+        val result = SimulatedRecording.write(
+            rec.csv,
+            rec.raw,
+            seconds,
+            rate,
+            feet = feet,
+            markers = markers,
+            startTimeIso = rec.startTimeIso,
+        )
+        store.writeSummary(rec.id, SessionSummary(result.durationMillis, feet, result.rows, markers.size))
+    }
+    demo(8.0, setOf(Foot.LEFT), SampleRate.HZ_100, emptyList(), raw = false)
+    time = OffsetDateTime.of(2026, 11, 12, 18, 12, 40, 0, ZoneOffset.ofHours(1))
+    demo(25.0, Foot.entries.toSet(), SampleRate.HZ_100, listOf(5.0 to "Mark 1"), raw = true)
+    time = OffsetDateTime.of(2026, 11, 13, 14, 5, 22, 0, ZoneOffset.ofHours(1))
+    demo(60.0, Foot.entries.toSet(), SampleRate.HZ_200, listOf(11.0 to "Mark 1", 38.5 to "Mark 2"), raw = true)
+    // Newest first by file time: the demo session on top.
+    for ((i, f) in dir.listFiles()!!.sortedBy { it.name }.withIndex()) f.setLastModified(1_000_000_000_000L + i)
+    store.csvFile(DEMO_ID).setLastModified(2_000_000_000_000L)
 }

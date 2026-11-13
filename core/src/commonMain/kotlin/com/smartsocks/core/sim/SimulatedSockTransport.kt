@@ -230,7 +230,13 @@ class SimulatedSockTransport(
         return ((now - last) / 1e6).coerceIn(0.0, MAX_BURST_CHUNKS * config.chunkMillis.toDouble())
     }
 
-    private fun nextPacket(tSeconds: Double): ByteArray {
+    /**
+     * The packet this simulator streams at [tSeconds] in the current [mode] at [range], without a link and without
+     * waiting: for generating recordings offline ([SimulatedRecording]). Advances the noise generator like streaming.
+     */
+    fun packetAt(tSeconds: Double, range: MeasurementRange = this.range): ByteArray = nextPacket(tSeconds, range)
+
+    private fun nextPacket(tSeconds: Double, range: MeasurementRange = this.range): ByteArray {
         gait.forces(tSeconds, mode, forces)
         val counts = IntArray(PacketFormat.CHANNELS)
         for (i in 0 until SENSOR_COUNT) {

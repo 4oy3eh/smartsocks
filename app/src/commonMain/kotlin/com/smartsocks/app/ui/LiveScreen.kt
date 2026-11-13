@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import com.smartsocks.app.live.FootView
 import com.smartsocks.app.live.LiveController
 import com.smartsocks.app.live.LiveSnapshot
+import com.smartsocks.app.recording.RecordingController
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.settings.ChartSettings
 import com.smartsocks.core.settings.LiveView
@@ -74,6 +75,8 @@ fun LiveScreen(
     onChartChange: (ChartSettings) -> Unit,
     compact: Boolean,
     modifier: Modifier = Modifier,
+    recorder: RecordingController? = null,
+    onOpenRecording: (String) -> Unit = {},
 ) {
     val snapshot = rememberLiveSnapshot(controller)
     Column(
@@ -81,7 +84,14 @@ fun LiveScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Spacer(Modifier.height(8.dp))
-        LiveViewSelector(view, onViewChange, Modifier.widthIn(max = 420.dp).fillMaxWidth())
+        Row(Modifier.widthIn(max = 720.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            LiveViewSelector(view, onViewChange, Modifier.weight(1f))
+            if (recorder != null) {
+                Spacer(Modifier.width(12.dp))
+                RecordButton(recorder, controller)
+            }
+        }
+        if (recorder != null) RecordingStrip(recorder, controller, compact, onOpenRecording)
         Box(
             Modifier.weight(1f).fillMaxWidth().padding(vertical = if (compact) 8.dp else 16.dp),
             contentAlignment = Alignment.Center,
@@ -102,7 +112,7 @@ fun LiveScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LiveViewSelector(selected: LiveView, onSelect: (LiveView) -> Unit, modifier: Modifier = Modifier) {
+internal fun LiveViewSelector(selected: LiveView, onSelect: (LiveView) -> Unit, modifier: Modifier = Modifier) {
     val views = LiveView.entries
     SingleChoiceSegmentedButtonRow(modifier) {
         views.forEachIndexed { i, v ->
@@ -132,7 +142,7 @@ private val LiveView.title: String
 
 /** L/R split with percentages and each foot's total load. Text changes only when the shown numbers change. */
 @Composable
-private fun BalancePanel(snapshot: State<LiveSnapshot>, modifier: Modifier = Modifier) {
+internal fun BalancePanel(snapshot: State<LiveSnapshot>, modifier: Modifier = Modifier) {
     val leftPercent by remember { derivedStateOf { snapshot.value.balance?.let { (it.left * 100).roundToInt() } } }
     val leftLoad by remember { derivedStateOf { snapshot.value.left.loadText() } }
     val rightLoad by remember { derivedStateOf { snapshot.value.right.loadText() } }

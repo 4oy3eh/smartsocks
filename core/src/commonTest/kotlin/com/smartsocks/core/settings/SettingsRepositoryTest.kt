@@ -7,6 +7,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -191,7 +192,9 @@ class SettingsRepositoryTest {
 
     @Test
     fun `a scope cancelled before the repository starts does not hang awaitLoaded or flush`() = runTest {
-        val dead = CoroutineScope(Job().apply { cancel() })
+        // On the test scheduler: with no dispatcher the cancelled coroutine would finish on a real Default thread,
+        // racing withTimeout's virtual clock.
+        val dead = CoroutineScope(Job().apply { cancel() } + StandardTestDispatcher(testScheduler))
         val store = storeWith(stored)
         val repo = SettingsRepository(store, dead)
         withTimeout(1_000) {

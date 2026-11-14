@@ -1,10 +1,27 @@
 package com.smartsocks.app.recording
 
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.protocol.MeasurementRange
+import com.smartsocks.core.protocol.SampleRate
+import com.smartsocks.core.recording.LineSource
 import com.smartsocks.core.recording.RecordingSink
+import com.smartsocks.core.session.StreamSettings
 
 /** What a recording's `#` header says about it (read from the first lines only). */
-data class SessionHeader(val startTimeIso: String? = null, val rateHz: Int? = null, val feet: Set<Foot> = emptySet()) {
+data class SessionHeader(
+    val startTimeIso: String? = null,
+    val rateHz: Int? = null,
+    val feet: Set<Foot> = emptySet(),
+    /** The measurement range the packets were recorded at: what their counts convert with. */
+    val range: MeasurementRange? = null,
+) {
+    /** The stream settings the recording was made with, if the header names both. */
+    val stream: StreamSettings?
+        get() {
+            val rate = SampleRate.entries.firstOrNull { it.hz == rateHz } ?: return null
+            return StreamSettings(rate, range ?: return null)
+        }
+
     companion object {
         /** From the header map of [com.smartsocks.core.recording.CsvSessionReader]; unknown values are left out. */
         fun of(header: Map<String, String>): SessionHeader = SessionHeader(
@@ -13,6 +30,7 @@ data class SessionHeader(val startTimeIso: String? = null, val rateHz: Int? = nu
             feet = header["feet"].orEmpty().split('+').mapNotNull { name ->
                 Foot.entries.firstOrNull { it.name == name.trim() }
             }.toSet(),
+            range = header["range"]?.trim()?.let { name -> MeasurementRange.entries.firstOrNull { it.name == name } },
         )
     }
 }
@@ -131,6 +149,16 @@ interface SessionStore {
      */
     fun <T> read(id: String, block: (lines: Iterable<String>, sizeBytes: Long) -> T): T
 
+    /** Recording [id] if it exists; reads only its header and summary, like [list]. */
+    fun find(id: String): StoredSession? = list().firstOrNull { it.id == id }
+
+    /**
+     * Opens the raw packet dump of recording [id] for reading line by line, from its start; the caller closes it.
+     * Unlike [read] it stays open across calls, for a replay that streams it over minutes.
+     * @throws NoSuchElementException if there is no such recording or it has no raw dump.
+     */
+    fun openRaw(id: String): LineSource
+
     /** Deletes the recording with its raw dump and summary. */
     fun delete(id: String)
 
@@ -139,6 +167,26 @@ interface SessionStore {
      * @throws IllegalArgumentException if [newName] is not a valid file name or is taken.
      */
     fun rename(id: String, newName: String): StoredSession
+}
+
+/**
+ * What may hold a recording's files open (a replay of it): asked to let go before the recording is deleted or
+ * renamed, and told the new name after a rename.
+ */
+interface SessionFileUsers {
+    /** Stops using recording [id]'s files and waits (briefly) until they are closed. */
+    suspend fun release(id: String)
+
+    /** Recording [oldId] is now called [newId]. */
+    fun renamed(oldId: String, newId: String)
+
+    companion object {
+        val None: SessionFileUsers = object : SessionFileUsers {
+            override suspend fun release(id: String) = Unit
+
+            override fun renamed(oldId: String, newId: String) = Unit
+        }
+    }
 }
 
 object SessionNames {
@@ -162,6 +210,13 @@ object SessionNames {
         val m = TIMESTAMP.matchEntire(id) ?: return id
         val (date, h, min, s, suffix) = m.destructured
         return "$date $h:$min:$s$suffix"
+    }
+
+    /** `2026-11-13_14-05-22` → `14:05:22`; any other name as it is. */
+    fun short(id: String): String {
+        val m = TIMESTAMP.matchEntire(id) ?: return id
+        val (_, h, min, s, suffix) = m.destructured
+        return "$h:$min:$s$suffix"
     }
 
     private val TIMESTAMP = Regex("""(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})(.*)""")

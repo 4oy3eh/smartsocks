@@ -29,6 +29,11 @@ data class CsvFootJoin(val foot: Foot, val tMillis: Double)
 internal const val CSV_FORMAT_KEY = "smartsocks-csv"
 internal const val CSV_FORMAT_VERSION = 2
 internal const val RAW_FORMAT_VERSION = 2
+internal const val RAW_FORMAT_KEY = "smartsocks-raw"
+internal const val RAW_COLUMNS = "t_ms,host_ms,foot,hex"
+
+/** Version 1 had no `host_ms`. */
+internal const val RAW_COLUMNS_V1 = "t_ms,foot,hex"
 internal const val MARKER_PREFIX = "# marker "
 
 /** `# foot_joined,<foot>,<t_ms>`: no `=` in it, so readers that predate it skip it as a comment. */
@@ -157,8 +162,8 @@ class RawPacketRecorder(private val sink: RecordingSink) {
     private var startHostNanos = 0L
 
     init {
-        sink.writeLine("# smartsocks-raw=$RAW_FORMAT_VERSION")
-        sink.writeLine("t_ms,host_ms,foot,hex")
+        sink.writeLine("# $RAW_FORMAT_KEY=$RAW_FORMAT_VERSION")
+        sink.writeLine(RAW_COLUMNS)
     }
 
     fun record(timed: TimedPacket) {

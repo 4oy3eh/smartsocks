@@ -2,6 +2,7 @@ package com.smartsocks.app.playback
 
 import com.smartsocks.app.live.LiveGeometry
 import com.smartsocks.app.recording.CountingLines
+import com.smartsocks.app.recording.SessionFileUsers
 import com.smartsocks.app.recording.SessionStore
 import com.smartsocks.app.recording.SessionSummary
 import com.smartsocks.app.recording.StoredSession
@@ -61,6 +62,8 @@ class SessionsController(
     private val clockNanos: (() -> Long)? = null,
     val activeRecording: StateFlow<String?> = MutableStateFlow(null),
     private val summarizeMissing: Boolean = true,
+    /** Let go of a recording's files (its replays) before it is deleted or renamed. */
+    private val fileUsers: SessionFileUsers = SessionFileUsers.None,
 ) {
     private val _list = MutableStateFlow<SessionList>(SessionList.Loading)
     val list: StateFlow<SessionList> = _list.asStateFlow()
@@ -147,14 +150,16 @@ class SessionsController(
     fun delete(session: StoredSession) {
         if (refuseWhileRecording(session)) return
         if (_player.value?.session?.id == session.id) closePlayer()
-        fileOperation("Cannot delete") { store.delete(session.id) }
+        fileOperation("Cannot delete", before = { fileUsers.release(session.id) }) { store.delete(session.id) }
     }
 
     /** Null when done, else why [newName] cannot be used (shown in the rename dialog). */
     suspend fun rename(session: StoredSession, newName: String): String? {
         if (isRecording(session)) return STILL_RECORDING
         return try {
+            fileUsers.release(session.id)
             val renamed = withContext(io) { store.rename(session.id, newName) }
+            if (renamed.id != session.id) fileUsers.renamed(session.id, renamed.id)
             refreshNow()
             // An open player keeps its data; only its name changes on the next open.
             if (renamed.id != session.id && _player.value?.session?.id == session.id) closePlayer()
@@ -177,9 +182,10 @@ class SessionsController(
     }
 
     /** Runs [block] on [io], then reloads the list; a failure is shown in [message]. */
-    private fun fileOperation(failure: String, block: () -> Unit) {
+    private fun fileOperation(failure: String, before: suspend () -> Unit = {}, block: () -> Unit) {
         scope.launch {
             try {
+                before()
                 withContext(io) { block() }
                 refreshNow()
             } catch (e: CancellationException) {

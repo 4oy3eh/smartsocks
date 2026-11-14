@@ -1,10 +1,17 @@
 package com.smartsocks.app.platform
 
+import com.smartsocks.app.recording.FileSessionStore
+import com.smartsocks.app.recording.SessionSummary
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.protocol.MeasurementRange
+import com.smartsocks.core.protocol.SampleRate
+import com.smartsocks.core.session.StreamSettings
 import com.smartsocks.core.settings.AppSettings
 import com.smartsocks.core.settings.AppTheme
 import com.smartsocks.core.settings.DeviceChoice
+import com.smartsocks.core.sim.ReplaySockTransport
 import com.smartsocks.core.sim.SimMode
+import com.smartsocks.core.sim.SimulatedRecording
 import com.smartsocks.core.sim.SimulatedSockTransport
 import com.smartsocks.transport.desktop.SerialPortInfo
 import com.smartsocks.transport.desktop.SerialSockTransport
@@ -17,6 +24,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class DesktopPlatformTest {
@@ -110,5 +118,68 @@ class DesktopPlatformTest {
         val bt = assertIs<DeviceResult.Unavailable>(devices.create(Foot.LEFT, DeviceChoice.Bluetooth("00:11", "Sock")))
         assertEquals("Bluetooth device Sock is not supported on desktop", bt.message)
         assertIs<DeviceResult.Unavailable>(devices.create(Foot.LEFT, DeviceChoice.None))
+    }
+
+    @Test
+    fun desktopReplaysRecordingsThatHaveRawPackets() {
+        val sessionsDir = File(dir, "replay-sessions")
+        val store = FileSessionStore(sessionsDir)
+        val rec = store.create(saveRaw = true)
+        SimulatedRecording.write(
+            rec.csv,
+            rec.raw,
+            1.0,
+            SampleRate.HZ_50,
+            MeasurementRange.K128,
+            feet = setOf(Foot.RIGHT),
+        )
+        val platform = desktopPlatform(File(dir, "s.txt"), DesktopDeviceCatalog { emptyList() }, sessionsDir)
+
+        assertEquals(listOf(DeviceKind.Simulator, DeviceKind.SerialPort, DeviceKind.Replay), platform.catalog.kinds)
+        val entry = platform.catalog.replaySessions().single()
+        assertEquals(rec.id, entry.id)
+        assertEquals(setOf(Foot.RIGHT), entry.feet)
+        assertEquals(StreamSettings(SampleRate.HZ_50, MeasurementRange.K128), entry.stream)
+
+        val ready = assertIs<DeviceResult.Ready>(
+            platform.devices.create(Foot.LEFT, DeviceChoice.Replay(rec.id, Foot.RIGHT)),
+        )
+        assertEquals(entry.stream, ready.stream)
+        assertIs<ReplaySockTransport>(ready.transport)
+
+        // The raw dump streams line by line and is released when closed.
+        val lines = store.openRaw(rec.id).use { source -> source.asSequence().toList() }
+        assertEquals(store.rawFile(rec.id).readLines(), lines)
+        assertEquals(52, lines.size)
+
+        // A replay holds the dump open: renaming and deleting still work (Windows: opened with share-delete).
+        val held = store.openRaw(rec.id)
+        held.next()
+        val renamed = store.rename(rec.id, "walk")
+        assertTrue(store.rawFile("walk").isFile && !store.rawFile(rec.id).exists())
+        assertEquals(51, held.asSequence().count(), "the open dump reads on")
+        val again = store.openRaw(renamed.id)
+        store.delete(renamed.id)
+        again.close()
+        held.close()
+        assertNull(store.find(renamed.id))
+        assertTrue(sessionsDir.listFiles().orEmpty().isEmpty(), "no file left: ${sessionsDir.list()?.toList()}")
+        assertFailsWith<NoSuchElementException> { store.openRaw(renamed.id) }
+    }
+
+    @Test
+    fun deleteRemovesTheRecordingItselfLast() {
+        val sessionsDir = File(dir, "delete-order")
+        val store = FileSessionStore(sessionsDir)
+        val rec = store.create(saveRaw = true)
+        SimulatedRecording.write(rec.csv, rec.raw, 0.5, SampleRate.HZ_50, MeasurementRange.K64)
+        store.writeSummary(rec.id, SessionSummary(500.0, Foot.entries.toSet(), 50, 0))
+        // Make the raw dump undeletable: a directory in its place cannot be deleted while it holds a file.
+        store.rawFile(rec.id).delete()
+        store.rawFile(rec.id).mkdirs()
+        File(store.rawFile(rec.id), "x").writeText("x")
+        assertFailsWith<java.io.IOException> { store.delete(rec.id) }
+        assertTrue(store.csvFile(rec.id).isFile, "the recording stays when its dump cannot go")
+        assertTrue(store.find(rec.id) != null, "still listed")
     }
 }

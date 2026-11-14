@@ -42,3 +42,25 @@ internal fun ByteArray.toHex(): String {
     }
     return out.toString()
 }
+
+/**
+ * The inverse of [toHex]: decodes `text[start until end]` (either case) into [out] from index 0. Returns false, with
+ * [out] partly written, unless the range is exactly `2 * out.size` hex digits.
+ */
+internal fun decodeHex(text: CharSequence, start: Int, end: Int, out: ByteArray): Boolean {
+    if (end - start != out.size * 2) return false
+    for (i in out.indices) {
+        val hi = hexDigit(text[start + 2 * i])
+        val lo = hexDigit(text[start + 2 * i + 1])
+        if (hi < 0 || lo < 0) return false
+        out[i] = ((hi shl 4) or lo).toByte()
+    }
+    return true
+}
+
+private fun hexDigit(c: Char): Int = when (c) {
+    in '0'..'9' -> c - '0'
+    in 'a'..'f' -> c - 'a' + 10
+    in 'A'..'F' -> c - 'A' + 10
+    else -> -1
+}

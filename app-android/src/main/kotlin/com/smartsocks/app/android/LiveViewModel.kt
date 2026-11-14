@@ -3,6 +3,7 @@ package com.smartsocks.app.android
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.smartsocks.app.live.ReplayFileUsers
 import com.smartsocks.app.playback.SessionsController
 import kotlinx.coroutines.Dispatchers
 
@@ -24,5 +25,6 @@ class LiveViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope,
         Dispatchers.IO,
         activeRecording = recorder.activeRecording,
+        fileUsers = ReplayFileUsers(controller, settings),
     )
 }

@@ -1,10 +1,13 @@
 package com.smartsocks.app.settings
 
 import com.smartsocks.app.platform.BluetoothDeviceEntry
+import com.smartsocks.app.platform.ReplaySessionEntry
 import com.smartsocks.app.platform.SerialPortEntry
+import com.smartsocks.app.recording.SessionNames
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.settings.AppSettings
 import com.smartsocks.core.settings.DeviceChoice
+import kotlin.math.roundToLong
 
 val Foot.other: Foot get() = if (this == Foot.LEFT) Foot.RIGHT else Foot.LEFT
 
@@ -12,11 +15,14 @@ val Foot.title: String get() = if (this == Foot.LEFT) "Left foot" else "Right fo
 
 /**
  * Both choices name the same physical sock: the same COM port (Windows port names ignore case) or the same
- * Bluetooth address. The simulator and "none" never clash: every foot gets its own simulator.
+ * Bluetooth address; for replays the same foot of the same recording (both feet replaying one recording, each its own
+ * foot, do not clash; looping or not makes no difference). The simulator and "none" never clash: every foot gets its
+ * own simulator.
  */
 fun DeviceChoice.isSameDeviceAs(other: DeviceChoice): Boolean = when (this) {
     is DeviceChoice.SerialPort -> other is DeviceChoice.SerialPort && portName.equals(other.portName, ignoreCase = true)
     is DeviceChoice.Bluetooth -> other is DeviceChoice.Bluetooth && address.equals(other.address, ignoreCase = true)
+    is DeviceChoice.Replay -> other is DeviceChoice.Replay && sessionId == other.sessionId && foot == other.foot
     DeviceChoice.None, is DeviceChoice.Simulator -> false
 }
 
@@ -30,6 +36,7 @@ val DeviceChoice.identity: String
         is DeviceChoice.Simulator -> "simulator:$preloaded"
         is DeviceChoice.SerialPort -> "serial:${portName.uppercase()}"
         is DeviceChoice.Bluetooth -> "bluetooth:${address.uppercase()}"
+        is DeviceChoice.Replay -> "replay:${foot.name}:$sessionId"
     }
 
 /** [foot]'s device is also the other foot's. The left foot keeps it; the right one is the one in conflict. */
@@ -116,6 +123,52 @@ object DeviceOptions {
             missingOption(it, it.name.ifBlank { it.address }, it.address, foot, other)
         }
         return listOfNotNull(missing) + rows
+    }
+
+    /**
+     * Recordings to replay on [foot], as listed; [foot]'s remembered one first of all if it is no longer listed. A
+     * row's choice plays the same foot of the recording if it has one, else the foot it has (keeping the loop setting
+     * of [foot]'s current replay); a row is used by the other foot only if that foot replays the same foot of it.
+     */
+    fun replays(sessions: List<ReplaySessionEntry>, foot: Foot, settings: AppSettings): List<DeviceOption> {
+        val current = settings.device(foot)
+        val other = settings.device(foot.other)
+        val loop = (current as? DeviceChoice.Replay)?.loop ?: DeviceChoice.Replay("", foot).loop
+        val rows = sessions.distinctBy { it.id }.map { entry ->
+            val selected = current is DeviceChoice.Replay && current.sessionId == entry.id
+            val playFoot = when {
+                selected -> (current as DeviceChoice.Replay).foot
+                foot in entry.feet || entry.feet.isEmpty() || !entry.feetKnown -> foot
+                else -> entry.feet.first()
+            }
+            val choice = DeviceChoice.Replay(entry.id, playFoot, loop)
+            DeviceOption(
+                choice = choice,
+                title = entry.title,
+                detail = replayDetail(entry),
+                looksLikeSock = false,
+                present = true,
+                selected = selected,
+                usedByOtherFoot = usedByOther(choice, selected, foot, other),
+            )
+        }
+        val missing = (current as? DeviceChoice.Replay)?.takeIf { rows.none { it.selected } }?.let {
+            missingOption(it, SessionNames.display(it.sessionId), "", foot, other)
+        }
+        return listOfNotNull(missing) + rows
+    }
+
+    /** "Both feet · 1:05", "Left foot · 0:08". */
+    private fun replayDetail(entry: ReplaySessionEntry): String {
+        val feet = when (entry.feet) {
+            Foot.entries.toSet() -> "Both feet"
+            else -> entry.feet.singleOrNull()?.title ?: ""
+        }
+        val duration = entry.durationMillis?.let { ms ->
+            val seconds = (ms / 1000).roundToLong()
+            "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}"
+        }
+        return listOfNotNull(feet.takeIf(String::isNotEmpty), duration).joinToString(" · ")
     }
 
     /** What to select when the user switches a foot to this kind of device: the first free, present sock-like one. */

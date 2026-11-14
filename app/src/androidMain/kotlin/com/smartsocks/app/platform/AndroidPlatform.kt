@@ -10,7 +10,8 @@ import java.io.File
 
 /**
  * Android: settings in the app's files directory; recordings in its external files (`Android/data/<app>/files/
- * sessions`, reachable over USB) or, without external storage, in its internal files; socks over Bluetooth RFCOMM.
+ * sessions`, reachable over USB) or, without external storage, in its internal files; socks over Bluetooth RFCOMM,
+ * recordings replayed as socks.
  * [fileProviderAuthority] shares recordings (see [AndroidSessionActions]).
  */
 fun androidPlatform(context: Context, fileProviderAuthority: String): Platform {
@@ -23,6 +24,7 @@ fun androidPlatform(context: Context, fileProviderAuthority: String): Platform {
             check = { choice ->
                 if (choice is DeviceChoice.Bluetooth) bluetoothProblem(BondedSocks.availability(app)) else null
             },
+            sessions = sessions,
         ) { _, choice ->
             when (choice) {
                 is DeviceChoice.Bluetooth ->
@@ -31,7 +33,7 @@ fun androidPlatform(context: Context, fileProviderAuthority: String): Platform {
                 else -> unsupportedOnThisPlatform(choice, "Android")
             }
         },
-        catalog = AndroidDeviceCatalog(app),
+        catalog = AndroidDeviceCatalog(app).withReplay(sessions),
         sessionStore = sessions,
         sessionActions = AndroidSessionActions(app, sessions, fileProviderAuthority),
     )

@@ -12,6 +12,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.smartsocks.app.live.LiveController
+import com.smartsocks.app.live.ReplayFileUsers
 import com.smartsocks.app.platform.desktopPlatform
 import com.smartsocks.app.playback.SessionsController
 import com.smartsocks.app.recording.RecordingController
@@ -19,8 +20,12 @@ import com.smartsocks.app.recording.StopReason
 import com.smartsocks.app.ui.AppScreen
 import com.smartsocks.app.ui.LivePerf
 import com.smartsocks.app.ui.SmartSocksApp
+import com.smartsocks.core.model.Foot
+import com.smartsocks.core.settings.AppSettings
+import com.smartsocks.core.settings.DeviceChoice
 import com.smartsocks.core.settings.LiveView
 import com.smartsocks.core.settings.SettingsRepository
+import com.smartsocks.core.settings.SettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,7 +44,11 @@ fun main() {
     val platform = desktopPlatform(simulatorConfig = { it.copy(disconnectAfterPackets = simDropAfter) })
     // Streaming and settings I/O run off the UI thread; the UI only samples the latest state per frame.
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    val settings = SettingsRepository(platform.settingsStore, scope)
+    // Development aid: both feet replay this recording (its name), each its own foot; the saved settings stay as
+    // they are (nothing is saved during such a run).
+    val replayId = System.getenv("SMARTSOCKS_REPLAY")?.trim()?.takeIf { it.isNotEmpty() }
+    val settingsStore = replayId?.let { ReplayRunSettings(platform.settingsStore, it) } ?: platform.settingsStore
+    val settings = SettingsRepository(settingsStore, scope)
     val controller = LiveController(settings, platform.devices, scope)
     val recorder = RecordingController(controller, platform.sessionStore, settings, scope, Dispatchers.IO)
     // The player runs on the UI thread (it is not thread-safe); file access on IO.
@@ -49,6 +58,7 @@ fun main() {
         uiThreadScope,
         Dispatchers.IO,
         activeRecording = recorder.activeRecording,
+        fileUsers = ReplayFileUsers(controller, settings),
     )
     // Development aid: open this recording (its name) in the player and play it, e.g. to measure playback.
     val playOnStart = System.getenv("SMARTSOCKS_PLAY")
@@ -135,6 +145,17 @@ fun main() {
             )
         }
     }
+}
+
+/** [inner]'s settings with both feet replaying recording [sessionId] and connecting on start; saves nothing. */
+private class ReplayRunSettings(private val inner: SettingsStore, private val sessionId: String) : SettingsStore {
+    override suspend fun load(): AppSettings = inner.load().copy(
+        left = DeviceChoice.Replay(sessionId, Foot.LEFT),
+        right = DeviceChoice.Replay(sessionId, Foot.RIGHT),
+        autoConnect = true,
+    )
+
+    override suspend fun save(settings: AppSettings) = Unit
 }
 
 private const val FLUSH_TIMEOUT_MILLIS = 1_000L

@@ -6,12 +6,11 @@ import com.smartsocks.app.live.LiveController
 import com.smartsocks.app.live.LiveGeometry
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.model.Foot
-import com.smartsocks.core.protocol.MeasurementRange
-import com.smartsocks.core.protocol.SampleRate
 import com.smartsocks.core.recording.CsvRecorder
 import com.smartsocks.core.recording.RawPacketRecorder
 import com.smartsocks.core.recording.RecordingMetadata
 import com.smartsocks.core.recording.RecordingSink
+import com.smartsocks.core.session.StreamSettings
 import com.smartsocks.core.session.TimedPacket
 import com.smartsocks.core.settings.AppSettings
 import com.smartsocks.core.settings.DeviceChoice
@@ -65,12 +64,26 @@ sealed interface RecordingState {
          * it streams. Never overlaps [feet].
          */
         val waiting: Set<Foot> = emptySet(),
+        /**
+         * Feet not recorded that stream at another rate or range than the recording (a replay of another
+         * recording): they cannot go into this file. Never overlaps [feet] or [waiting].
+         */
+        val incompatible: Set<Foot> = emptySet(),
     ) : RecordingState {
-        /** After a change of the feet's links: a streaming foot is recorded from now on; [waiting] is recomputed. */
-        fun following(statuses: Collection<FootStatus>): Recording {
-            val recorded = feet + statuses.filter { it.state == LinkState.Streaming }.map { it.foot }
-            val waiting = statuses.filter { it.foot !in recorded && it.isWaitingToJoin() }.map { it.foot }.toSet()
-            return if (recorded == feet && waiting == this.waiting) this else copy(feet = recorded, waiting = waiting)
+        /**
+         * After a change of the feet's links: a streaming foot is recorded from now on if it [fits] the recording
+         * (streams at its rate and range), else it is [incompatible]; [waiting] is recomputed.
+         */
+        fun following(statuses: Collection<FootStatus>, fits: (Foot) -> Boolean = { true }): Recording {
+            val streaming = statuses.filter { it.state == LinkState.Streaming && it.foot !in feet }.map { it.foot }
+            val recorded = feet + streaming.filter(fits)
+            val incompatible = streaming.filterNot(fits).toSet()
+            val waiting = statuses
+                .filter { it.foot !in recorded && it.foot !in incompatible && it.isWaitingToJoin() }
+                .map { it.foot }
+                .toSet()
+            if (recorded == feet && waiting == this.waiting && incompatible == this.incompatible) return this
+            return copy(feet = recorded, waiting = waiting, incompatible = incompatible)
         }
     }
 
@@ -118,6 +131,8 @@ data class RecordingResult(
     val joinedMillis: Map<Foot, Double> = emptyMap(),
     /** Feet that were waiting to connect during the recording but never streamed into it. */
     val neverJoined: Set<Foot> = emptySet(),
+    /** Feet that streamed at another rate or range than the recording, so were left out of it. */
+    val incompatible: Set<Foot> = emptySet(),
 )
 
 /**
@@ -146,6 +161,11 @@ fun FootStatus.isWaitingToJoin(): Boolean = device != DeviceChoice.None && wante
  * counted ([RecordingState.Recording.dropped], [RecordingState.Recording.droppedRaw]). Not counted: what a
  * session's own stream buffer (1024 samples, oldest dropped) loses if these collectors stall, which only happens if
  * the whole process does.
+ *
+ * The file's header names one rate and range: the ones the recorded feet's sessions read at (a replay's are the
+ * recorded ones, see [com.smartsocks.app.platform.DeviceResult.Ready.stream]). Feet streaming at different ones
+ * cannot be recorded together: [start] refuses, and a foot that would join at other ones is left out
+ * ([RecordingState.Recording.incompatible]).
  *
  * A foot that disconnects keeps its place: when it streams again (reconnect) its samples go on into the same file,
  * on the same time axis (the controller's shared clock). While a recording runs, the stream settings (rate, range)
@@ -199,7 +219,8 @@ class RecordingController(
 
     /**
      * What of a settings change may take effect: while recording, the stream settings and the devices stay (a
-     * simulator's walking/standing mode may still change: that does not rebuild the session).
+     * simulator's walking/standing mode and a replay's loop setting may still change: they do not rebuild the
+     * session).
      */
     fun restrict(old: AppSettings, new: AppSettings): AppSettings {
         if (!isRecording) return new
@@ -208,7 +229,9 @@ class RecordingController(
             val after = new.device(foot)
             val modeOnly = before is DeviceChoice.Simulator && after is DeviceChoice.Simulator &&
                 before.preloaded == after.preloaded
-            return if (modeOnly) after else before
+            val loopOnly = before is DeviceChoice.Replay && after is DeviceChoice.Replay &&
+                before.copy(loop = after.loop) == after
+            return if (modeOnly || loopOnly) after else before
         }
         return new.copy(stream = old.stream, left = keep(Foot.LEFT), right = keep(Foot.RIGHT))
     }
@@ -218,16 +241,24 @@ class RecordingController(
         Foot.entries.filter { live.link(it).status.value.state == LinkState.Streaming }.toSet()
 
     /**
-     * Starts recording the streaming feet (a configured foot that streams later joins); false if nothing streams or
-     * a recording is running.
+     * Starts recording the streaming feet (a configured foot that streams later joins); false if nothing streams, a
+     * recording is running, or the streaming feet read at different rates or ranges (then [lastResult] says so).
      */
     fun start(): Boolean {
         val feet = streamingFeet()
-        if (feet.isEmpty()) return false
+        if (feet.isEmpty() || _state.value != RecordingState.Idle) return false
+        val streams = feet.mapNotNull { live.link(it).session.value?.settings }.distinct()
+        val stream = streams.singleOrNull()
+        if (stream == null) {
+            if (streams.size > 1) {
+                _lastResult.value = RecordingResult(null, StopReason.Error, error = DIFFERENT_STREAMS)
+            }
+            return false
+        }
         if (!_state.compareAndSet(RecordingState.Idle, RecordingState.Starting)) return false
         _lastResult.value = null
         val s = settings.settings.value
-        val run = Run(feet, s.stream.rate, s.stream.range, s.recording.saveRaw)
+        val run = Run(feet, stream, s.recording.saveRaw)
         current = run
         run.job = scope.launch(io) { run.execute() }
         return true
@@ -252,13 +283,15 @@ class RecordingController(
         _lastResult.value = null
     }
 
-    private inner class Run(
-        val feet: Set<Foot>,
-        val rate: SampleRate,
-        val range: MeasurementRange,
-        val saveRaw: Boolean,
-    ) {
+    private inner class Run(val feet: Set<Foot>, val stream: StreamSettings, val saveRaw: Boolean) {
         var job: Job? = null
+
+        /** Every foot that streamed at other settings at some point while not recorded. */
+        @Volatile
+        var incompatible: Set<Foot> = emptySet()
+
+        /** [foot]'s current session reads at this recording's rate and range. */
+        fun fits(foot: Foot): Boolean = live.link(foot).session.value?.settings == stream
 
         /** FootState, TimedPacket, Marker or Flush: no wrapper per sample. */
         val queue = Channel<Any>(queueCapacity)
@@ -313,7 +346,9 @@ class RecordingController(
                 // The header names the feet of [start] only: any other foot (even one that began to stream while the
                 // files were created) is announced by a join line with its first sample, so the file never names a
                 // foot it may then have no data of.
-                Writer(files, RecordingMetadata(files.startTimeIso, rate, range, feet, layout = LiveGeometry.layout))
+                val metadata =
+                    RecordingMetadata(files.startTimeIso, stream.rate, stream.range, feet, layout = LiveGeometry.layout)
+                Writer(files, metadata)
             } catch (e: CancellationException) {
                 created?.let { discard(it) }
                 throw e
@@ -327,8 +362,11 @@ class RecordingController(
             // foreground service from the background); it only finishes.
             _state.update {
                 if (it == RecordingState.Starting && !queue.isClosedForSend) {
-                    RecordingState.Recording(files.id, feet, live.nowNanos()).following(statuses())
-                        .also { r -> expected = r.waiting }
+                    RecordingState.Recording(files.id, feet, live.nowNanos()).following(statuses(), ::fits)
+                        .also { r ->
+                            expected = r.waiting
+                            incompatible = r.incompatible
+                        }
                 } else {
                     it
                 }
@@ -384,22 +422,30 @@ class RecordingController(
 
         private suspend fun feed(writer: Writer) = coroutineScope {
             // Every foot, not only those recorded at the start: one that streams later joins (a foot without a
-            // device has no session). The devices cannot change meanwhile, see [restrict].
+            // device has no session), unless it reads at other settings. The devices cannot change meanwhile, see
+            // [restrict].
             for (foot in Foot.entries) {
                 val link = live.link(foot)
                 launch(start = CoroutineStart.UNDISPATCHED) {
-                    link.session.collectLatest { session -> session?.states?.collect { offer(it) } }
+                    link.session.collectLatest { session ->
+                        if (session?.settings == stream) session.states.collect { offer(it) }
+                    }
                 }
                 if (saveRaw) {
                     launch(start = CoroutineStart.UNDISPATCHED) {
-                        link.session.collectLatest { session -> session?.rawPackets?.collect { offer(it) } }
+                        link.session.collectLatest { session ->
+                            if (session?.settings == stream) session.rawPackets.collect { offer(it) }
+                        }
                     }
                 }
             }
             launch {
                 combine(live.left.status, live.right.status) { l, r -> listOf(l, r) }.collect { statuses ->
-                    _state.update { if (it is RecordingState.Recording) it.following(statuses) else it }
-                    (_state.value as? RecordingState.Recording)?.let { expected = expected + it.waiting }
+                    _state.update { if (it is RecordingState.Recording) it.following(statuses, ::fits) else it }
+                    (_state.value as? RecordingState.Recording)?.let {
+                        expected = expected + it.waiting
+                        incompatible = incompatible + it.incompatible
+                    }
                 }
             }
             // A flush a second also when no sample comes (both feet gone): what was written reaches the disk.
@@ -442,7 +488,8 @@ class RecordingController(
                 error = error,
                 feet = writer?.feetSeen.orEmpty(),
                 joinedMillis = writer?.joinedMillis.orEmpty(),
-                neverJoined = expected - writer?.feetSeen.orEmpty(),
+                neverJoined = expected - incompatible - writer?.feetSeen.orEmpty(),
+                incompatible = incompatible - writer?.feetSeen.orEmpty(),
             )
             if (current === this) current = null
             _activeRecording.value = null
@@ -556,5 +603,8 @@ class RecordingController(
         const val PUBLISH_MILLIS = 250L
         const val FLUSH_MILLIS = 1_000L
         private const val FLUSH_EVERY_ITEMS = 4096
+
+        const val DIFFERENT_STREAMS =
+            "Left and right use different sample rates or ranges, so they can't be recorded into one file"
     }
 }

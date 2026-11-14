@@ -47,6 +47,13 @@ object SettingsCodec {
                     put("$p.bt.address", d.address)
                     put("$p.bt.name", d.name)
                 }
+
+                is DeviceChoice.Replay -> {
+                    put("$p.device", REPLAY)
+                    put("$p.replay.session", d.sessionId)
+                    put("$p.replay.foot", d.foot.name)
+                    put("$p.replay.loop", d.loop)
+                }
             }
         }
         put("stream.rate", settings.stream.rate.name)
@@ -126,6 +133,15 @@ object SettingsCodec {
 
                 BLUETOOTH -> values["$p.bt.address"]?.takeIf { it.isNotBlank() }?.let {
                     DeviceChoice.Bluetooth(it, values["$p.bt.name"] ?: "")
+                } ?: fallback
+
+                // The session is required; a missing or invalid foot plays the same foot.
+                REPLAY -> values["$p.replay.session"]?.takeIf { it.isNotBlank() }?.let {
+                    DeviceChoice.Replay(
+                        sessionId = it,
+                        foot = enum("$p.replay.foot", foot) { name -> Foot.valueOf(name.uppercase()) },
+                        loop = boolean("$p.replay.loop", DeviceChoice.Replay("", foot).loop),
+                    )
                 } ?: fallback
 
                 else -> fallback
@@ -229,4 +245,5 @@ object SettingsCodec {
     private const val SIMULATOR = "simulator"
     private const val SERIAL = "serial"
     private const val BLUETOOTH = "bluetooth"
+    private const val REPLAY = "replay"
 }

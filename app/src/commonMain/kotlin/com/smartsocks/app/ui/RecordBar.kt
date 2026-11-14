@@ -242,6 +242,7 @@ private fun ResultNotice(
  */
 internal fun recordingDetails(s: RecordingState.Recording): String = buildList {
     add(recordingFeetText(s.feet, s.waiting))
+    for (foot in s.incompatible.sorted()) add("${footName(foot)} not recorded: other rate or range")
     add(sizeText(s.bytes))
     if (s.markers > 0) add(if (s.markers == 1) "1 mark" else "${s.markers} marks")
     if (s.dropped > 0) add("${s.dropped} samples dropped")
@@ -256,6 +257,7 @@ internal fun resultText(r: RecordingResult): String {
             add("${footName(foot)} foot joined at ${PlayerController.timeText(t, tenths = false)}")
         }
         for (foot in r.neverJoined.sorted()) add("${footName(foot)} foot never connected")
+        for (foot in r.incompatible.sorted()) add("${footName(foot)} foot not recorded (other rate or range)")
         if (r.markers > 0) add(if (r.markers == 1) "1 mark" else "${r.markers} marks")
         if (r.dropped > 0) add("${r.dropped} samples dropped (storage too slow)")
         if (r.droppedRaw > 0) add("${r.droppedRaw} raw packets dropped")

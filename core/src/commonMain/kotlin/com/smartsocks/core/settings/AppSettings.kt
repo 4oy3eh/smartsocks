@@ -18,6 +18,12 @@ sealed interface DeviceChoice {
 
     /** A paired sock by its Bluetooth MAC address (Android RFCOMM); [name] is for display only. */
     data class Bluetooth(val address: String, val name: String) : DeviceChoice
+
+    /**
+     * A recording played back as if it were a sock: [foot]'s packets of the raw dump of recording [sessionId] (any
+     * foot may play either foot's packets); [loop]: start over at the end instead of disconnecting there.
+     */
+    data class Replay(val sessionId: String, val foot: Foot, val loop: Boolean = true) : DeviceChoice
 }
 
 enum class AppTheme { SYSTEM, LIGHT, DARK }

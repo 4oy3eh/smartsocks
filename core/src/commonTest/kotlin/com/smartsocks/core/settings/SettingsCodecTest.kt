@@ -98,6 +98,8 @@ class SettingsCodecTest {
             DeviceChoice.SerialPort("/dev/rfcomm0"),
             DeviceChoice.Bluetooth("00:11:22:33:44:55", ""),
             DeviceChoice.Bluetooth("00:11:22:33:44:55", "Left sock"),
+            DeviceChoice.Replay("2026-11-13_14-05-22", Foot.LEFT),
+            DeviceChoice.Replay("walk = slow\\fast", Foot.RIGHT, loop = false),
         )
         for (l in choices) {
             for (r in choices) {
@@ -105,6 +107,34 @@ class SettingsCodecTest {
                 assertEquals(s, roundTrip(s), "$l / $r")
             }
         }
+    }
+
+    @Test
+    fun `a replay is read forgivingly`() {
+        fun decode(vararg lines: String) = SettingsCodec.decode(withVersion(*lines))
+
+        // The foot defaults to the same foot, the loop to on; foot names in any case.
+        assertEquals(
+            DeviceChoice.Replay("rec", Foot.RIGHT, loop = true),
+            decode("right.device=replay", "right.replay.session=rec", "right.replay.loop=maybe").right,
+        )
+        assertEquals(
+            DeviceChoice.Replay("rec", Foot.LEFT, loop = false),
+            decode(
+                "right.device=REPLAY",
+                "right.replay.session=rec",
+                "right.replay.foot=left",
+                "right.replay.loop=false",
+            )
+                .right,
+        )
+        assertEquals(
+            DeviceChoice.Replay("rec", Foot.LEFT),
+            decode("left.device=replay", "left.replay.session=rec", "left.replay.foot=MIDDLE").left,
+        )
+        // Without a session there is nothing to replay: the default device.
+        assertEquals(AppSettings().left, decode("left.device=replay", "left.replay.session=  ").left)
+        assertEquals(AppSettings().right, decode("right.device=replay", "right.replay.foot=LEFT").right)
     }
 
     @Test

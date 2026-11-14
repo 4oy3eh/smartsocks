@@ -1,6 +1,7 @@
 package com.smartsocks.app.recording
 
 import com.smartsocks.core.recording.InMemoryRecordingSink
+import com.smartsocks.core.recording.LineSource
 import com.smartsocks.core.recording.RecordingSink
 
 /**
@@ -15,6 +16,13 @@ class MemorySessionStore(var failCreate: Boolean = false, var failWriteAfter: In
 
     /** Recordings put in directly (e.g. a corrupt one), by id. */
     val texts = LinkedHashMap<String, List<String>>()
+
+    /** Raw packet dumps put in directly, by id (recorded ones are in [entries]). */
+    val rawTexts = LinkedHashMap<String, List<String>>()
+
+    /** Raw dumps opened by [openRaw] and not closed yet. */
+    var openRawCount = 0
+        private set
 
     /** Summaries of every recording, recorded or put in. */
     val summaries = LinkedHashMap<String, SessionSummary>()
@@ -46,7 +54,7 @@ class MemorySessionStore(var failCreate: Boolean = false, var failWriteAfter: In
             modifiedMillis = 0,
             header = SessionHeader.of(header),
             summary = summaries[id],
-            hasRaw = entries[id]?.raw != null,
+            hasRaw = entries[id]?.raw != null || id in rawTexts,
         )
     }
 
@@ -88,9 +96,20 @@ class MemorySessionStore(var failCreate: Boolean = false, var failWriteAfter: In
         return block(handed, lines.sumOf { it.length + 1L })
     }
 
+    override fun openRaw(id: String): LineSource {
+        val lines = rawTexts[id] ?: entries[id]?.raw?.lines ?: throw NoSuchElementException("No raw dump of $id")
+        openRawCount++
+        var closed = false
+        return LineSource(lines.toList().iterator()) {
+            if (!closed) openRawCount--
+            closed = true
+        }
+    }
+
     override fun delete(id: String) {
         entries.remove(id)
         texts.remove(id)
+        rawTexts.remove(id)
         summaries.remove(id)
     }
 
@@ -98,6 +117,7 @@ class MemorySessionStore(var failCreate: Boolean = false, var failWriteAfter: In
         SessionNames.problem(newName)?.let { throw IllegalArgumentException(it) }
         entries.remove(id)?.let { entries[newName] = it }
         texts.remove(id)?.let { texts[newName] = it }
+        rawTexts.remove(id)?.let { rawTexts[newName] = it }
         summaries.remove(id)?.let { summaries[newName] = it }
         return list().first { it.id == newName }
     }

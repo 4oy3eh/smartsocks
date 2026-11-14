@@ -1,10 +1,13 @@
 package com.smartsocks.app.recording
 
+import com.smartsocks.core.recording.LineSource
 import com.smartsocks.core.recording.RecordingSink
+import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileAlreadyExistsException
@@ -125,8 +128,28 @@ class FileSessionStore(
         }
     }
 
+    override fun find(id: String): StoredSession? = if (csvFile(id).isFile) {
+        runCatching {
+            stored(id)
+        }.getOrNull()
+    } else {
+        null
+    }
+
+    override fun openRaw(id: String): LineSource {
+        val file = rawFile(id)
+        if (!file.isFile) throw NoSuchElementException("The recording $id has no raw packet dump")
+        // NIO opens it with FILE_SHARE_DELETE on Windows: the recording can still be deleted or renamed meanwhile.
+        val reader = BufferedReader(
+            InputStreamReader(Files.newInputStream(file.toPath()), Charsets.UTF_8),
+            BUFFER_CHARS,
+        )
+        return LineSource(reader.lineSequence().iterator(), reader::close)
+    }
+
+    /** The recording itself last: if a file cannot be deleted, the recording stays listed, never an orphan. */
     override fun delete(id: String) {
-        for (file in listOf(csvFile(id), rawFile(id), summaryFile(id))) {
+        for (file in listOf(rawFile(id), summaryFile(id), csvFile(id))) {
             if (file.exists() && !file.delete()) throw IOException("Cannot delete ${file.name}")
         }
     }

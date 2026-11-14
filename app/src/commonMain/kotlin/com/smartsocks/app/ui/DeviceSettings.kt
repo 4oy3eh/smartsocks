@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -46,9 +47,11 @@ import com.smartsocks.app.platform.BluetoothState
 import com.smartsocks.app.platform.DeviceActions
 import com.smartsocks.app.platform.DeviceCatalog
 import com.smartsocks.app.platform.DeviceKind
+import com.smartsocks.app.platform.ReplaySessionEntry
 import com.smartsocks.app.platform.SerialPortEntry
 import com.smartsocks.app.platform.UnavailableReason
 import com.smartsocks.app.platform.kind
+import com.smartsocks.app.recording.SessionNames
 import com.smartsocks.app.settings.DeviceOption
 import com.smartsocks.app.settings.DeviceOptions
 import com.smartsocks.app.settings.deviceInUseByOtherFoot
@@ -69,6 +72,9 @@ internal class DeviceLists {
     var ports by mutableStateOf<List<SerialPortEntry>?>(null)
     var bluetoothState by mutableStateOf<BluetoothState?>(null)
     var bluetoothDevices by mutableStateOf<List<BluetoothDeviceEntry>>(emptyList())
+
+    /** Recordings that can be replayed; null until the first load. */
+    var replays by mutableStateOf<List<ReplaySessionEntry>?>(null)
     var loading by mutableStateOf(false)
     var reloads by mutableIntStateOf(0)
 
@@ -92,7 +98,11 @@ internal fun rememberDeviceLists(catalog: DeviceCatalog, actions: DeviceActions)
             val state = if (DeviceKind.Bluetooth in kinds) catalog.bluetoothState() else BluetoothState.Unsupported
             state to if (state == BluetoothState.Ready) catalog.bluetoothDevices() else emptyList()
         }
+        val replays = withContext(Dispatchers.Default) {
+            if (DeviceKind.Replay in kinds) catalog.replaySessions() else emptyList()
+        }
         lists.ports = ports
+        lists.replays = replays
         lists.bluetoothState = bluetooth.first
         lists.bluetoothDevices = bluetooth.second
         lists.loading = false
@@ -106,6 +116,7 @@ internal val DeviceKind?.title: String
         DeviceKind.Simulator -> "Simulator"
         DeviceKind.SerialPort -> "Serial port"
         DeviceKind.Bluetooth -> "Bluetooth"
+        DeviceKind.Replay -> "Replay"
     }
 
 /** One foot's device: the kind, its options and the live connection with Connect/Disconnect. */
@@ -164,43 +175,50 @@ internal fun FootDeviceCard(
             return@SettingsCard
         }
         FieldLabel("Device")
-        SegmentedChoice(
-            options = kinds,
-            selected = shownKind,
-            title = { it.title },
-            onSelect = { kind ->
-                pendingKind = null
-                when (kind) {
-                    null -> onChange { it.withDevice(foot, DeviceChoice.None) }
+        val selectKind: (DeviceKind?) -> Unit = { kind ->
+            pendingKind = null
+            when (kind) {
+                null -> onChange { it.withDevice(foot, DeviceChoice.None) }
 
-                    DeviceKind.Simulator ->
-                        if (current !is DeviceChoice.Simulator) {
-                            onChange {
-                                it.withDevice(foot, DeviceChoice.Simulator())
-                            }
-                        }
-
-                    DeviceKind.SerialPort, DeviceKind.Bluetooth -> if (current.kind != kind) {
-                        val options = if (kind == DeviceKind.SerialPort) {
-                            DeviceOptions.serialPorts(lists.ports.orEmpty(), foot, settings)
-                        } else {
-                            DeviceOptions.bluetooth(lists.bluetoothDevices, foot, settings)
-                        }
-                        val suggestion = DeviceOptions.suggestion(options)
-                        if (suggestion != null) {
-                            onChange { it.withDeviceIfFree(foot, suggestion.choice) }
-                        } else {
-                            pendingKind = kind
+                DeviceKind.Simulator ->
+                    if (current !is DeviceChoice.Simulator) {
+                        onChange {
+                            it.withDevice(foot, DeviceChoice.Simulator())
                         }
                     }
+
+                DeviceKind.SerialPort, DeviceKind.Bluetooth, DeviceKind.Replay -> if (current.kind != kind) {
+                    val options = when (kind) {
+                        DeviceKind.SerialPort -> DeviceOptions.serialPorts(lists.ports.orEmpty(), foot, settings)
+                        DeviceKind.Bluetooth -> DeviceOptions.bluetooth(lists.bluetoothDevices, foot, settings)
+                        else -> DeviceOptions.replays(lists.replays.orEmpty(), foot, settings)
+                    }
+                    val suggestion = DeviceOptions.suggestion(options)
+                    if (suggestion != null) {
+                        onChange { it.withDeviceIfFree(foot, suggestion.choice) }
+                    } else {
+                        pendingKind = kind
+                    }
                 }
-            },
-        )
+            }
+        }
+        // Segments while every kind's name fits (desktop cards), wrapping chips otherwise (phones).
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            if (maxWidth >= MIN_SEGMENT_WIDTH * kinds.size) {
+                SegmentedChoice(options = kinds, selected = shownKind, title = { it.title }, onSelect = selectKind)
+            } else {
+                ChipChoice(options = kinds, selected = shownKind, title = { it.title }, onSelect = selectKind)
+            }
+        }
         Spacer(Modifier.height(14.dp))
         val draft = pendingKind
         if (draft != null) {
             // Picked a kind but no device of it yet: the foot keeps its current device meanwhile.
-            val what = if (draft == DeviceKind.SerialPort) "a port" else "a sock"
+            val what = when (draft) {
+                DeviceKind.SerialPort -> "a port"
+                DeviceKind.Replay -> "a recording"
+                else -> "a sock"
+            }
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -235,6 +253,8 @@ internal fun FootDeviceCard(
                     )
                 }
             }
+
+            DeviceKind.Replay -> ReplayOptions(foot, settings, lists, onChange)
         }
 
         if (foot == Foot.RIGHT && settings.deviceInUseByOtherFoot(foot)) {
@@ -247,6 +267,9 @@ internal fun FootDeviceCard(
     }
 }
 
+/** The narrowest segment of the device kind row that shows "Serial port" in full. */
+private val MIN_SEGMENT_WIDTH = 104.dp
+
 /** The device in a sentence: "the simulator", "COM5", "Block 3". */
 private val DeviceChoice.shortTitle: String
     get() = when (this) {
@@ -254,6 +277,7 @@ private val DeviceChoice.shortTitle: String
         is DeviceChoice.Simulator -> "the simulator"
         is DeviceChoice.SerialPort -> portName
         is DeviceChoice.Bluetooth -> name.ifBlank { address }
+        is DeviceChoice.Replay -> "the replay of ${SessionNames.display(sessionId)}"
     }
 
 /** Connect / Disconnect, or the fix for a device that is missing something. */
@@ -427,6 +451,60 @@ private fun BluetoothOptions(
     if (selected != null && lists.bluetoothState != BluetoothState.Ready) {
         Hint("Selected: ${selected.name.ifBlank { selected.address }}", modifier = Modifier.padding(top = 10.dp))
     }
+}
+
+/**
+ * A recording to replay (the list), which of its feet this foot plays and whether it loops. Both feet may replay the
+ * same recording, each its own foot.
+ */
+@Composable
+private fun ReplayOptions(
+    foot: Foot,
+    settings: AppSettings,
+    lists: DeviceLists,
+    onChange: ((AppSettings) -> AppSettings) -> Unit,
+) {
+    val current = settings.device(foot) as? DeviceChoice.Replay
+    val sessions = lists.replays
+    ListHeader("Recording", lists)
+    if (sessions == null) {
+        Hint("Looking for recordings…")
+    } else {
+        val options = DeviceOptions.replays(sessions, foot, settings)
+        if (options.isEmpty()) {
+            Hint("No recordings to replay yet. Only recordings made with \"Also save raw packets\" on can be replayed.")
+        }
+        DeviceOptionList(options, foot, tag = "") { choice -> onChange { it.withDeviceIfFree(foot, choice) } }
+    }
+    if (current == null) return
+    val entry = sessions?.firstOrNull { it.id == current.sessionId }
+    // The recording's feet (both while it is not listed or they are not known), and the one played anyway.
+    val known = entry?.takeIf { it.feetKnown }?.feet?.takeIf { it.isNotEmpty() }
+    val feet = (known ?: Foot.entries.toSet()) + current.foot
+    FieldLabel("Plays the recorded", Modifier.padding(top = 14.dp))
+    SegmentedChoice(
+        options = Foot.entries.filter { it in feet },
+        selected = current.foot,
+        title = { it.title.lowercase().replaceFirstChar(Char::uppercase) },
+        onSelect = { f -> onChange { it.withDeviceIfFree(foot, current.copy(foot = f)) } },
+    )
+    Spacer(Modifier.height(6.dp))
+    SwitchRow(
+        title = "Loop",
+        description = "Start over at the end. Off: the foot disconnects when the recording ends.",
+        checked = current.loop,
+        onCheckedChange = { on -> onChange { it.withDevice(foot, current.copy(loop = on)) } },
+    )
+    val stream = entry?.stream
+    Hint(
+        if (stream != null) {
+            "Streams the packets as recorded, at ${stream.rate.label} and ${stream.range.label}, " +
+                "whatever the Stream settings say."
+        } else {
+            "Streams the packets as recorded, at the recorded rate and range."
+        },
+        modifier = Modifier.padding(top = 6.dp),
+    )
 }
 
 /** Radio rows; [tag] marks the likely socks. */

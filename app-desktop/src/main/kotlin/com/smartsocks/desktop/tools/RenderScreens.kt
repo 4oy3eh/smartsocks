@@ -10,6 +10,7 @@ import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Density
 import com.smartsocks.app.live.LiveController
+import com.smartsocks.app.live.ReplayFileUsers
 import com.smartsocks.app.platform.BluetoothDeviceEntry
 import com.smartsocks.app.platform.BluetoothState
 import com.smartsocks.app.platform.DeviceActions
@@ -63,6 +64,7 @@ import java.io.File
 import java.nio.file.Files
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
+import kotlin.coroutines.ContinuationInterceptor
 
 /**
  * How the case is shown: the whole app (live, settings, sessions list, player), or the settings screen alone with
@@ -150,6 +152,11 @@ private val medialSum = chart200.copy(
 )
 
 private val loop = 10.0 to 13.6
+
+private val replayBoth = AppSettings(
+    left = DeviceChoice.Replay(DEMO_ID, Foot.LEFT),
+    right = DeviceChoice.Replay(DEMO_ID, Foot.RIGHT, loop = false),
+)
 
 /** The right sock never opens: it keeps reconnecting (attempt 2 waits 2 s, from about 1.6 s on). */
 private val rightFails: (Foot, SimConfig) -> SimConfig =
@@ -478,6 +485,19 @@ private val cases = listOf(
         ),
     ),
     Case("settings-phone", 360, 780, 2.5f, AppTheme.LIGHT, Screen.SETTINGS),
+    // Both feet replay the demo recording, each its own foot; the right one stops at the end.
+    Case(
+        "settings-phone-replay",
+        360,
+        1300,
+        2.5f,
+        AppTheme.DARK,
+        Screen.SETTINGS,
+        settings = replayBoth,
+        warmupFrames = 300,
+    ),
+    Case("settings-desktop-replay", 1120, 900, 1f, AppTheme.LIGHT, Screen.SETTINGS, settings = replayBoth),
+    Case("live-replay-desktop-dark", 1120, 760, 1f, AppTheme.DARK, settings = replayBoth),
     Case("settings-phone-full", 360, 3000, 2.5f, AppTheme.DARK, Screen.SETTINGS_EXPANDED),
     // Android: the emulator (no adapter), a missing permission, a ready adapter with bonded socks.
     Case(
@@ -590,11 +610,13 @@ fun main(args: Array<String>) {
             // The player lives on this (single) thread, like the UI thread of the app.
             // A child of this (single) thread's scope, cancelled after the case.
             val uiScope = CoroutineScope(coroutineContext + Job(coroutineContext[Job]))
+            val uiDispatcher = requireNotNull(coroutineContext[ContinuationInterceptor])
             val sessions = SessionsController(
                 platform.sessionStore,
                 uiScope,
                 Dispatchers.IO,
                 activeRecording = recorder.activeRecording,
+                fileUsers = ReplayFileUsers(controller, settings),
             )
             case.player?.let { setup ->
                 val demo = platform.sessionStore.list().first { it.id == setup.sessionId }
@@ -623,6 +645,9 @@ fun main(args: Array<String>) {
                 width = (case.widthDp * case.density).toInt(),
                 height = (case.heightDp * case.density).toInt(),
                 density = Density(case.density, case.fontScale),
+                // Effects resume on this thread, as on the app's UI thread (not on whatever thread they suspended
+                // to): otherwise state they write after a withContext (the device lists) may never show.
+                coroutineContext = uiDispatcher,
             ) {
                 if (case.screen == Screen.SETTINGS_EXPANDED) {
                     val current by settings.settings.collectAsState()
@@ -632,7 +657,7 @@ fun main(args: Array<String>) {
                                 current,
                                 settings::update,
                                 controller,
-                                case.catalog,
+                                platform.catalog,
                                 PreviewActions(case.permissionBlocked),
                                 advancedExpanded = true,
                             )
@@ -642,7 +667,7 @@ fun main(args: Array<String>) {
                     SmartSocksApp(
                         settings,
                         controller,
-                        case.catalog,
+                        platform.catalog,
                         PreviewActions(case.permissionBlocked),
                         recorder = recorder,
                         sessions = sessions,

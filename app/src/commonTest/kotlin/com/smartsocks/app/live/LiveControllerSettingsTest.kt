@@ -57,7 +57,7 @@ class LiveControllerSettingsTest {
 
                 is DeviceChoice.Bluetooth, is DeviceChoice.SerialPort -> SimConfig(mode = SimMode.Lifted)
 
-                DeviceChoice.None -> return unsupportedOnThisPlatform(choice, "Test")
+                DeviceChoice.None, is DeviceChoice.Replay -> return unsupportedOnThisPlatform(choice, "Test")
             }
             val sim = SimulatedSockTransport(foot, config.copy(disconnectAfterPackets = dropAfterPackets))
             created += foot to sim

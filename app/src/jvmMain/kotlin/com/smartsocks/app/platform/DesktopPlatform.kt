@@ -12,7 +12,8 @@ import java.io.File
 
 /**
  * Desktop: settings in `%APPDATA%\SmartSocks` (Windows) or `~/.smartsocks`; recordings in
- * `Documents\SmartSocks`; socks as COM ports. [simulatorConfig]: see [DeviceFactory.withSimulator].
+ * `Documents\SmartSocks`; socks as COM ports, recordings replayed as socks. [simulatorConfig]: see
+ * [DeviceFactory.withSimulator].
  */
 fun desktopPlatform(
     settingsFile: File = defaultDesktopSettingsFile(),
@@ -23,13 +24,13 @@ fun desktopPlatform(
     val store = FileSessionStore(sessionsDir, locationText = sessionsLocationText(sessionsDir))
     return Platform(
         settingsStore = FileSettingsStore(settingsFile),
-        devices = DeviceFactory.withSimulator(simulatorConfig = simulatorConfig) { _, choice ->
+        devices = DeviceFactory.withSimulator(simulatorConfig = simulatorConfig, sessions = store) { _, choice ->
             when (choice) {
                 is DeviceChoice.SerialPort -> DeviceResult.Ready(SerialSockTransport(choice.portName))
                 else -> unsupportedOnThisPlatform(choice, "desktop")
             }
         },
-        catalog = catalog,
+        catalog = catalog.withReplay(store),
         sessionStore = store,
         sessionActions = DesktopSessionActions(store),
     )

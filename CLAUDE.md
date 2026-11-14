@@ -30,8 +30,9 @@ center of pressure (COP), запись сессий. Идёт переписыв
 
 - `core/` — KMP-модуль без Android-зависимостей (сейчас таргет `jvm`):
   `protocol` (пакеты, команды, декодер) · `model` · `analytics` (baseline, нагрузка 1/R, COP, 1€-фильтр, баланс L/R) ·
-  `transport` (интерфейс `SockTransport`) · `sim` (модель шага + `SimulatedSockTransport`) · `session` (`SockSession`) ·
-  `recording` (CSV/raw запись, потоковое чтение) · `playback` (таймлайн, события шага, `SessionPlayer`) ·
+  `transport` (интерфейс `SockTransport`) · `sim` (модель шага + `SimulatedSockTransport`; `ReplaySockTransport` —
+  raw-дамп записи как носок, ноги синхронны через общий `ReplayClock`) · `session` (`SockSession`) ·
+  `recording` (CSV/raw запись, потоковое чтение, `RawDumpReader`) · `playback` (таймлайн, события шага, `SessionPlayer`) ·
   `settings` (`AppSettings`, кодек, `SettingsRepository`).
 - `transport-desktop/` — COM-порт (jSerialComm) + `probe`; `transport-android/` — RFCOMM (AGP 9.5.1,
   `com.android.kotlin.multiplatform.library`, тесты в `androidHostTest`). Android SDK: `ANDROID_HOME`, `local.properties`.

@@ -156,6 +156,10 @@ data class FootStatus(
  * An explicit calibration survives a session rebuild that keeps the sock (by its identity: port or address, not
  * its display name) and the measurement range (e.g. a new sample rate).
  *
+ * A device that streams at fixed settings ([DeviceResult.Ready.stream]: a replay, at the recorded rate and range) is
+ * read with those instead of [AppSettings.stream]; one that does not reconnect ([DeviceResult.Ready.reconnects]: a
+ * replay that reached its end) stays down when its link ends, whatever [AppSettings.autoReconnect] says.
+ *
  * Streaming runs in [scope] independently of the UI; the UI calls [sample] once per frame. Every sample of both
  * feet also goes into [history] (for the charts), from the stream's own coroutines. Both feet share [clockNanos]
  * (pass a virtual one only in tests); [nowNanos] reads it, on the time axis of the samples' timestamps.
@@ -512,11 +516,13 @@ class LiveController(
                 is DeviceResult.Ready -> result
             }
             val transport = ready.transport
-            val baselineKey = BaselineKey(config.device.identity, config.stream.range)
+            // A device that streams at fixed settings (a replay: as recorded) is read with those.
+            val stream = ready.stream ?: config.stream
+            val baselineKey = BaselineKey(config.device.identity, stream.range)
             val session = SockSession(
                 foot,
                 transport,
-                config.stream,
+                stream,
                 layout = LiveGeometry.layout,
                 processorSettings = current.processor,
                 clockNanos = clockNanos,
@@ -545,6 +551,15 @@ class LiveController(
                             if (it != session.processorSettings.value) session.updateProcessorSettings(it)
                         }
                     }
+                    val replay = ready.replay
+                    if (replay != null) {
+                        launch {
+                            settings.settings
+                                .map { (it.device(foot) as? DeviceChoice.Replay)?.loop }
+                                .filterNotNull()
+                                .collect { replay.loop = it }
+                        }
+                    }
                     val simulator = ready.simulator
                     if (simulator != null) {
                         launch {
@@ -568,7 +583,8 @@ class LiveController(
                     }
                     combine(request.filterNotNull(), pausedHere) { req, paused -> req to paused }
                         .collectLatest { (req, paused) ->
-                            if (req.connect && !paused) keepConnected(req, session, device, footHistory)
+                            if (!req.connect || paused) return@collectLatest
+                            keepConnected(req, session, device, footHistory, ready.reconnects)
                         }
                 }
             } catch (e: DeviceBlocked) {
@@ -590,6 +606,7 @@ class LiveController(
             session: SockSession,
             device: DeviceChoice,
             footHistory: FootHistory,
+            reconnects: Boolean,
         ) {
             val job = currentCoroutineContext()[Job]
             var progress = ReconnectBackoff.Progress()
@@ -614,7 +631,7 @@ class LiveController(
                         session.run { reason ->
                             if (job?.isActive != true) return@run
                             blocked = checkDevice(device)
-                            if (blocked != null || !settings.settings.value.autoReconnect) {
+                            if (blocked != null || !reconnects || !settings.settings.value.autoReconnect) {
                                 loop.value = null // down for good: shown as it is
                                 return@run
                             }
@@ -698,7 +715,8 @@ class LiveController(
 
     /**
      * The part of [AppSettings] a session is built from. The simulator mode is left out (it is switched on the
-     * running simulator), and so are the processor settings (applied to the running session).
+     * running simulator), and so are the processor settings (applied to the running session); for a replay also its
+     * loop setting (switched on the running replay) and the stream settings (it streams at the recorded ones).
      */
     private data class FootConfig(
         val device: DeviceChoice,
@@ -711,10 +729,12 @@ class LiveController(
             fun of(foot: Foot, settings: AppSettings, retry: Int): FootConfig {
                 val device = when (val d = settings.device(foot)) {
                     is DeviceChoice.Simulator -> d.copy(mode = SimMode.Walking)
+                    is DeviceChoice.Replay -> d.copy(loop = true)
                     else -> d
                 }
                 val inUse = foot == Foot.RIGHT && settings.deviceInUseByOtherFoot(foot)
-                return FootConfig(device, settings.stream, inUse, retry)
+                val stream = if (device is DeviceChoice.Replay) StreamSettings() else settings.stream
+                return FootConfig(device, stream, inUse, retry)
             }
         }
     }

@@ -34,7 +34,9 @@ import java.lang.management.ManagementFactory
 import kotlin.math.roundToInt
 
 fun main() {
-    val platform = desktopPlatform()
+    // Development aid: every simulated link drops after this many packets (per connect), to see reconnecting.
+    val simDropAfter = System.getenv("SMARTSOCKS_SIM_DROP_AFTER")?.toLongOrNull()?.takeIf { it > 0 }
+    val platform = desktopPlatform(simulatorConfig = { it.copy(disconnectAfterPackets = simDropAfter) })
     // Streaming and settings I/O run off the UI thread; the UI only samples the latest state per frame.
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val settings = SettingsRepository(platform.settingsStore, scope)

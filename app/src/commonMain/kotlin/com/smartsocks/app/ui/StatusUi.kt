@@ -30,11 +30,12 @@ fun LinkState.label(): String = when (this) {
     LinkState.Configuring -> "Configuring…"
     LinkState.Streaming -> "Streaming"
     is LinkState.Disconnected -> reason?.let { "Disconnected: $it" } ?: "Disconnected"
+    is LinkState.Reconnecting -> "Reconnecting in $secondsLeft s · #$attempt"
 }
 
 fun SockColors.forState(state: LinkState): Color = when (state) {
     LinkState.Streaming -> ok
-    LinkState.Connecting, LinkState.Configuring -> busy
+    LinkState.Connecting, LinkState.Configuring, is LinkState.Reconnecting -> busy
     is LinkState.Unavailable, is LinkState.Disconnected -> error
     LinkState.NoDevice, LinkState.Idle -> idle
 }
@@ -60,6 +61,9 @@ private fun FootStatus.chipText(compact: Boolean): String = when (val s = state)
     }
 
     is LinkState.Disconnected -> "Disconnected"
+
+    is LinkState.Reconnecting ->
+        if (compact) "Retry ${s.secondsLeft} s · #${s.attempt}" else s.label()
 }
 
 /** The user can fix this foot's state from the app: grant the permission, switch Bluetooth on. */
@@ -71,11 +75,15 @@ fun FootStatus.statusText(): String = when (state) {
     else -> state.label()
 }
 
-/** "L · Streaming · 100/s"; a tap connects or disconnects the foot (or asks for what it is missing). */
+/**
+ * "L · Streaming · 100/s"; a tap connects or disconnects the foot (or asks for what it is missing). While
+ * reconnecting a tap calls the retries off.
+ */
 @Composable
 fun FootChip(status: FootStatus, compact: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val colors = LocalSockColors.current
-    val enabled = status.state.isActive || status.state.canConnect || status.state.isFixable
+    val enabled = status.state.isActive || status.state.isRecovering || status.state.canConnect ||
+        status.state.isFixable
     Surface(
         onClick = onClick,
         enabled = enabled,

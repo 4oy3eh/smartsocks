@@ -188,8 +188,12 @@ class SockSession(
      * so a collector may reconnect right from it. On cancellation the transport is closed by a watcher even if its
      * `read` ignores cancellation (the read itself must still be suspending, not block the calling thread); the
      * watcher also sends STOP first if the normal cleanup is stuck behind that read.
+     *
+     * [onEnd] gets the reason (null when cancelled) once the transport is closed, right before
+     * [ConnectionState.Disconnected] is published: a caller can show what comes next (e.g. a reconnect) without a
+     * moment of "disconnected" in between. It must be quick; an exception from it is ignored.
      */
-    suspend fun run() {
+    suspend fun run(onEnd: (reason: String?) -> Unit = {}) {
         check(running.compareAndSet(false, true)) { "run() is already active on this session" }
         var reason: String? = null
         val own = RunState(_connection.value)
@@ -197,6 +201,11 @@ class SockSession(
             reason = link(own)
         } finally {
             running.value = false
+            try {
+                onEnd(reason)
+            } catch (_: Exception) {
+                // The caller's bookkeeping failed; the session still has to say it is down.
+            }
             // A new run may already have started: then its state stays.
             _connection.compareAndSet(own.last, ConnectionState.Disconnected(reason))
         }

@@ -3,6 +3,7 @@ package com.smartsocks.app.platform
 import com.smartsocks.app.recording.FileSessionStore
 import com.smartsocks.app.recording.StoredSession
 import com.smartsocks.core.settings.DeviceChoice
+import com.smartsocks.core.sim.SimConfig
 import com.smartsocks.transport.desktop.SerialPortInfo
 import com.smartsocks.transport.desktop.SerialPorts
 import com.smartsocks.transport.desktop.SerialSockTransport
@@ -11,17 +12,18 @@ import java.io.File
 
 /**
  * Desktop: settings in `%APPDATA%\SmartSocks` (Windows) or `~/.smartsocks`; recordings in
- * `Documents\SmartSocks`; socks as COM ports.
+ * `Documents\SmartSocks`; socks as COM ports. [simulatorConfig]: see [DeviceFactory.withSimulator].
  */
 fun desktopPlatform(
     settingsFile: File = defaultDesktopSettingsFile(),
     catalog: DeviceCatalog = DesktopDeviceCatalog(),
     sessionsDir: File = defaultDesktopSessionsDir(),
+    simulatorConfig: (SimConfig) -> SimConfig = { it },
 ): Platform {
     val store = FileSessionStore(sessionsDir, locationText = sessionsLocationText(sessionsDir))
     return Platform(
         settingsStore = FileSettingsStore(settingsFile),
-        devices = DeviceFactory.withSimulator { _, choice ->
+        devices = DeviceFactory.withSimulator(simulatorConfig = simulatorConfig) { _, choice ->
             when (choice) {
                 is DeviceChoice.SerialPort -> DeviceResult.Ready(SerialSockTransport(choice.portName))
                 else -> unsupportedOnThisPlatform(choice, "desktop")

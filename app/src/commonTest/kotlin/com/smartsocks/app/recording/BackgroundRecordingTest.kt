@@ -2,8 +2,11 @@ package com.smartsocks.app.recording
 
 import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveController
+import com.smartsocks.app.live.TestSocks
+import com.smartsocks.app.live.noJitter
 import com.smartsocks.app.platform.DeviceFactory
 import com.smartsocks.app.platform.DeviceResult
+import com.smartsocks.app.platform.UnavailableReason
 import com.smartsocks.app.platform.simulatorTransport
 import com.smartsocks.app.platform.unsupportedOnThisPlatform
 import com.smartsocks.core.model.Foot
@@ -64,21 +67,33 @@ class BackgroundRecordingTest {
         val background: BackgroundRecording,
         val keepAlive: FakeKeepAlive,
         val store: MemorySessionStore,
+        val settings: SettingsRepository,
     )
 
-    /** Both feet on walking simulators (virtual time), auto-connect on. */
-    private fun TestScope.fixture(initial: AppSettings = AppSettings(), bluetoothPermission: Boolean = true): Fixture {
+    /** Both feet on walking simulators (virtual time) unless [devices] says otherwise, auto-connect on. */
+    private fun TestScope.fixture(
+        initial: AppSettings = AppSettings(),
+        bluetoothPermission: Boolean = true,
+        devices: DeviceFactory = simulators,
+    ): Fixture {
         val settings = SettingsRepository(InMemorySettingsStore(SettingsCodec.encode(initial)), backgroundScope)
-        val live = LiveController(settings, simulators, backgroundScope, initiallyPaused = true) {
-            testScheduler.currentTime * 1_000_000
-        }
+        val live =
+            LiveController(
+                settings,
+                devices,
+                backgroundScope,
+                initiallyPaused = true,
+                reconnectDelayMillis = noJitter,
+            ) {
+                testScheduler.currentTime * 1_000_000
+            }
         val store = MemorySessionStore()
         val recorder =
             RecordingController(live, store, settings, backgroundScope, StandardTestDispatcher(testScheduler))
         val keepAlive = FakeKeepAlive()
         val background =
             BackgroundRecording(live, recorder, settings, keepAlive, { bluetoothPermission }, backgroundScope)
-        return Fixture(live, recorder, background, keepAlive, store)
+        return Fixture(live, recorder, background, keepAlive, store, settings)
     }
 
     private fun TestScope.advance(millis: Long) {
@@ -93,13 +108,18 @@ class BackgroundRecordingTest {
     private fun Fixture.noneStreaming() = !streaming(Foot.LEFT) && !streaming(Foot.RIGHT)
 
     /** In the foreground with both feet streaming, then recording with the keep-alive granted. */
-    private fun TestScope.recordingKeptAlive(): Fixture {
-        val f = fixture()
+    private fun TestScope.recordingKeptAlive(
+        initial: AppSettings = AppSettings(),
+        devices: DeviceFactory = simulators,
+        type: KeepAliveType = KeepAliveType.SpecialUse,
+    ): Fixture {
+        val f = fixture(initial, devices = devices)
         f.background.onForeground()
         advance(1_000)
+        assertTrue(f.bothStreaming())
         assertTrue(f.recorder.start())
         runCurrent()
-        assertEquals(listOf("start ${KeepAliveType.SpecialUse}"), f.keepAlive.calls)
+        assertEquals(listOf("start $type"), f.keepAlive.calls)
         f.background.onKeepAliveStarted(f.keepAlive.lastRequest)
         runCurrent()
         return f
@@ -351,8 +371,143 @@ class BackgroundRecordingTest {
         assertIs<RecordingState.Recording>(f.recorder.state.value, "one foot is still linked")
         f.live.right.disconnect()
         advance(500)
+        assertIs<RecordingState.Recording>(f.recorder.state.value, "a moment without links is not enough")
+        advance(BackgroundRecording.DOWN_GRACE_MILLIS)
         assertEquals(StopReason.LinksLost, f.recorder.lastResult.value?.reason)
         assertTrue(f.live.paused.value)
+    }
+
+    @Test
+    fun feetThatReconnectInTheBackgroundKeepTheRecordingGoing() = runTest {
+        val socks = TestSocks({ testScheduler.currentTime })
+        val f = recordingKeptAlive(devices = socks)
+        f.background.onBackground()
+        advance(2_000)
+        // Both links drop at once: both reconnecting, none linked for a moment.
+        socks.latest(Foot.LEFT).drop()
+        socks.latest(Foot.RIGHT).drop()
+        advance(50)
+        for (foot in Foot.entries) assertIs<LinkState.Reconnecting>(f.live.link(foot).status.value.state)
+        assertIs<RecordingState.Recording>(f.recorder.state.value, "reconnecting feet are still recorded")
+        assertEquals(emptySet(), f.live.pausedFeet.value)
+        advance(1_500)
+        assertTrue(f.bothStreaming())
+        advance(1_000)
+        f.recorder.stopAndJoin()
+        assertEquals(StopReason.User, f.recorder.lastResult.value?.reason)
+        val timeline = SessionTimeline.read(f.store.lines(f.store.entries.keys.single()))
+        for (foot in Foot.entries) {
+            assertTrue(timeline.track(foot).lastMillis!! > 4_000, "$foot recorded after the reconnect")
+        }
+    }
+
+    @Test
+    fun aFootThatCannotReconnectByItselfEndsTheRecordingInTheBackground() = runTest {
+        val socks = TestSocks({ testScheduler.currentTime })
+        val l = DeviceChoice.Bluetooth("00:16:A4:00:00:01", "Block 3")
+        val r = DeviceChoice.Bluetooth("00:16:A4:00:00:02", "Block 3")
+        val f = recordingKeptAlive(AppSettings(left = l, right = r), socks, KeepAliveType.ConnectedDevice)
+        f.background.onBackground()
+        advance(1_000)
+        // Bluetooth switched off: both links drop, and the device check says it is pointless to retry.
+        socks.problem = DeviceResult.Unavailable("Bluetooth is off", UnavailableReason.BluetoothOff)
+        socks.latest(Foot.LEFT).drop()
+        socks.latest(Foot.RIGHT).drop()
+        advance(100)
+        assertIs<LinkState.Unavailable>(f.live.left.status.value.state)
+        advance(BackgroundRecording.DOWN_GRACE_MILLIS)
+        assertEquals(StopReason.LinksLost, f.recorder.lastResult.value?.reason)
+        assertTrue(f.store.entries.values.single().csv.closed)
+        assertTrue(f.live.paused.value)
+    }
+
+    @Test
+    fun withReconnectOffADropInTheBackgroundEndsTheRecordingAsBefore() = runTest {
+        val socks = TestSocks({ testScheduler.currentTime })
+        val f = recordingKeptAlive(AppSettings(autoReconnect = false), socks)
+        f.background.onBackground()
+        advance(1_000)
+        socks.latest(Foot.LEFT).drop()
+        advance(100)
+        assertIs<RecordingState.Recording>(f.recorder.state.value, "the right foot is still linked")
+        socks.latest(Foot.RIGHT).drop()
+        advance(100 + BackgroundRecording.DOWN_GRACE_MILLIS)
+        assertEquals(StopReason.LinksLost, f.recorder.lastResult.value?.reason)
+    }
+
+    @Test
+    fun switchingReconnectOffWhileBothFeetReconnectEndsTheRecording() = runTest {
+        val socks = TestSocks({ testScheduler.currentTime })
+        val f = recordingKeptAlive(devices = socks)
+        f.background.onBackground()
+        advance(1_000)
+        socks.failOpen = true
+        socks.latest(Foot.LEFT).drop()
+        socks.latest(Foot.RIGHT).drop()
+        advance(5_000)
+        assertIs<RecordingState.Recording>(f.recorder.state.value)
+        f.settings.update { it.copy(autoReconnect = false) }
+        advance(100 + BackgroundRecording.DOWN_GRACE_MILLIS)
+        assertEquals(StopReason.LinksLost, f.recorder.lastResult.value?.reason)
+    }
+
+    @Test
+    fun feetThatKeepFailingInTheBackgroundEndTheRecordingAfterFiveMinutes() = runTest {
+        val socks = TestSocks({ testScheduler.currentTime })
+        val f = recordingKeptAlive(devices = socks)
+        socks.failOpen = true
+        socks.latest(Foot.LEFT).drop()
+        socks.latest(Foot.RIGHT).drop()
+        // In the foreground the user sees it: no limit there, and that time does not count.
+        advance(10 * 60_000L)
+        assertIs<RecordingState.Recording>(f.recorder.state.value)
+
+        f.background.onBackground()
+        advance(BackgroundRecording.RECONNECT_GIVE_UP_MILLIS - 1_000)
+        assertIs<RecordingState.Recording>(f.recorder.state.value, "still trying")
+        assertTrue(f.live.left.status.value.state.isRecovering)
+        advance(2_000)
+        assertEquals(StopReason.LinksLost, f.recorder.lastResult.value?.reason)
+        assertTrue(f.store.entries.values.single().csv.closed)
+        assertTrue(f.live.paused.value)
+    }
+
+    @Test
+    fun aFootThatStreamsAgainRestartsTheFiveMinutes() = runTest {
+        val socks = TestSocks({ testScheduler.currentTime })
+        val f = recordingKeptAlive(devices = socks)
+        f.background.onBackground()
+        socks.failOpen = true
+        socks.latest(Foot.LEFT).drop()
+        socks.latest(Foot.RIGHT).drop()
+        advance(4 * 60_000L)
+        socks.failOpen = false
+        advance(31_000) // the next attempts (at most 30 s apart) connect
+        assertTrue(f.bothStreaming())
+        socks.failOpen = true
+        socks.latest(Foot.LEFT).drop()
+        socks.latest(Foot.RIGHT).drop()
+        advance(4 * 60_000L)
+        assertIs<RecordingState.Recording>(f.recorder.state.value, "four minutes since the feet streamed")
+        advance(60_000L + 1_000)
+        assertEquals(StopReason.LinksLost, f.recorder.lastResult.value?.reason)
+    }
+
+    @Test
+    fun aMomentWithoutLinksInTheBackgroundDoesNotEndTheRecording() = runTest {
+        val f = recordingKeptAlive()
+        f.background.onBackground()
+        advance(1_000)
+        f.live.left.disconnect()
+        f.live.right.disconnect()
+        advance(200)
+        assertTrue(f.noneStreaming())
+        f.live.left.connect()
+        f.live.right.connect()
+        advance(BackgroundRecording.DOWN_GRACE_MILLIS * 2)
+        assertIs<RecordingState.Recording>(f.recorder.state.value)
+        assertTrue(f.bothStreaming())
+        assertEquals(emptySet(), f.live.pausedFeet.value)
     }
 
     @Test

@@ -50,6 +50,11 @@ data class AppSettings(
     val recording: RecordingSettings = RecordingSettings(),
     /** Connect to the remembered devices on start. */
     val autoConnect: Boolean = true,
+    /**
+     * Retry a foot whose link drops or fails to open while it is meant to be connected, with a growing wait in
+     * between (see `ReconnectBackoff` in the app). Off: such a foot stays disconnected until connected again.
+     */
+    val autoReconnect: Boolean = true,
 ) {
     fun device(foot: Foot): DeviceChoice = if (foot == Foot.LEFT) left else right
 

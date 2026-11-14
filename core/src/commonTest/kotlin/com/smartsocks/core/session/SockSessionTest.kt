@@ -442,6 +442,43 @@ class SockSessionTest {
     }
 
     @Test
+    fun `onEnd gets the reason after the close and before Disconnected is shown`() = runTest {
+        val sim = sim(config = SimConfig(connectDelayMillis = 0, disconnectAfterPackets = 50))
+        var closes = 0
+        val session = session(CloseHook(sim) { closes++ })
+        val seen = mutableListOf<String>()
+        session.run { reason ->
+            seen += "end $reason while ${session.connection.value}"
+            assertTrue(closes > 0, "the transport is closed: a reconnect may open it again")
+            assertEquals(SockCommand.Stop, sim.receivedCommands.last { it == SockCommand.Stop })
+            assertFalse(session.calibrate(10), "the link is gone")
+        }
+        assertEquals(listOf("end Link closed while ${ConnectionState.Streaming}"), seen)
+        assertEquals(ConnectionState.Disconnected("Link closed"), session.connection.value)
+
+        // A failed open, and a cancelled run (null).
+        val failing = session(sim(config = SimConfig(failToConnect = true)))
+        failing.run { seen += "failed $it" }
+        assertEquals("failed Simulated connection failure", seen.last())
+        val job = launch { session.run { seen += "cancelled $it" } }
+        advanceTimeBy(200) // streaming, before the 50th packet
+        job.cancel()
+        job.join()
+        assertEquals("cancelled null", seen.last())
+        assertEquals(ConnectionState.Disconnected(null), session.connection.value)
+    }
+
+    @Test
+    fun `a throwing onEnd still leaves the session disconnected and ready for the next run`() = runTest {
+        val session = session(sim(config = SimConfig(connectDelayMillis = 0, disconnectAfterPackets = 20)))
+        session.run { error("bookkeeping failed") }
+        assertEquals(ConnectionState.Disconnected("Link closed"), session.connection.value)
+        session.run()
+        assertEquals(ConnectionState.Disconnected("Link closed"), session.connection.value)
+        assertEquals(20, session.stats.value.packets)
+    }
+
+    @Test
     fun `reports connection failure`() = runTest {
         val session = session(sim(config = SimConfig(failToConnect = true)))
         session.run()

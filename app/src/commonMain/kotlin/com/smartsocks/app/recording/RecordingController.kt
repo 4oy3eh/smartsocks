@@ -73,7 +73,9 @@ enum class StopReason {
 
     /**
      * In the background no recorded foot was connected (the links went down there, or already before the app left
-     * the foreground): nothing reconnects without the UI.
+     * the foreground) and none could come back by itself: reconnecting was off or impossible without the user
+     * (Bluetooth off, permission), or the feet kept failing to reconnect for
+     * [BackgroundRecording.RECONNECT_GIVE_UP_MILLIS].
      */
     LinksLost,
 

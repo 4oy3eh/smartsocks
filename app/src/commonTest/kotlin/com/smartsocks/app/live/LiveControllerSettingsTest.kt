@@ -72,7 +72,9 @@ class LiveControllerSettingsTest {
 
     private fun TestScope.fixture(initial: AppSettings, devices: Devices = Devices()): Fixture {
         val settings = SettingsRepository(InMemorySettingsStore(SettingsCodec.encode(initial)), backgroundScope)
-        val controller = LiveController(settings, devices, backgroundScope) { testScheduler.currentTime * 1_000_000 }
+        val controller = LiveController(settings, devices, backgroundScope, reconnectDelayMillis = noJitter) {
+            testScheduler.currentTime * 1_000_000
+        }
         return Fixture(settings, devices, controller)
     }
 
@@ -135,7 +137,7 @@ class LiveControllerSettingsTest {
     @Test
     fun aLinkDropDuringCalibrationIsAFailureAndKeepsThePreviousState() = runTest {
         // ~1.2 s of packets at 100 Hz after streaming starts.
-        val f = fixture(AppSettings(left = liftedPreloaded), Devices(dropAfterPackets = 120))
+        val f = fixture(AppSettings(left = liftedPreloaded, autoReconnect = false), Devices(dropAfterPackets = 120))
         val left = f.controller.left
         advance(800)
         assertEquals(LinkState.Streaming, left.status.value.state)

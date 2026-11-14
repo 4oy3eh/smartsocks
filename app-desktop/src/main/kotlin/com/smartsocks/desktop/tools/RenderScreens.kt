@@ -20,6 +20,7 @@ import com.smartsocks.app.platform.DeviceResult
 import com.smartsocks.app.platform.SerialPortEntry
 import com.smartsocks.app.platform.UnavailableReason
 import com.smartsocks.app.platform.desktopPlatform
+import com.smartsocks.app.platform.simulatorTransport
 import com.smartsocks.app.playback.SessionsController
 import com.smartsocks.app.playback.loadSession
 import com.smartsocks.app.recording.FileSessionStore
@@ -42,6 +43,7 @@ import com.smartsocks.core.settings.InMemorySettingsStore
 import com.smartsocks.core.settings.LiveView
 import com.smartsocks.core.settings.SettingsCodec
 import com.smartsocks.core.settings.SettingsRepository
+import com.smartsocks.core.sim.SimConfig
 import com.smartsocks.core.sim.SimMode
 import com.smartsocks.core.sim.SimulatedRecording
 import kotlinx.coroutines.CoroutineScope
@@ -94,6 +96,8 @@ private class Case(
     /** Start recording after a third of the warm-up, add a marker after two thirds. */
     val record: Boolean = false,
     val player: PlayerSetup? = null,
+    /** Adjusts the simulators' config per foot (e.g. a link that fails to open, to show reconnecting). */
+    val simulator: ((Foot, SimConfig) -> SimConfig)? = null,
 )
 
 private class PreviewActions(blocked: Boolean) : DeviceActions {
@@ -135,6 +139,10 @@ private val chart200 = AppSettings(liveView = LiveView.CHART, stream = StreamSet
 private val numbers = AppSettings(liveView = LiveView.NUMBERS)
 
 private val loop = 10.0 to 13.6
+
+/** The right sock never opens: it keeps reconnecting (attempt 2 waits 2 s, from about 1.6 s on). */
+private val rightFails: (Foot, SimConfig) -> SimConfig =
+    { foot, config -> if (foot == Foot.RIGHT) config.copy(failToConnect = true) else config }
 
 private val cases = listOf(
     // Recording on the live screen.
@@ -345,6 +353,12 @@ private val cases = listOf(
         settings = AppSettings(left = sockL, right = DeviceChoice.SerialPort("COM99")),
     ),
     Case("phone-idle", 360, 780, 2.5f, AppTheme.DARK, settings = AppSettings(autoConnect = false)),
+    // Reconnecting: the right foot's link does not open.
+    Case("live-reconnecting-desktop-light", 1120, 760, 1f, AppTheme.LIGHT, simulator = rightFails),
+    Case("live-reconnecting-desktop-dark", 1120, 760, 1f, AppTheme.DARK, settings = numbers, simulator = rightFails),
+    Case("live-reconnecting-phone-dark", 360, 780, 2.5f, AppTheme.DARK, simulator = rightFails),
+    Case("settings-reconnecting-desktop-light", 1120, 760, 1f, AppTheme.LIGHT, Screen.SETTINGS, simulator = rightFails),
+    Case("settings-reconnecting-phone-dark", 360, 780, 2.5f, AppTheme.DARK, Screen.SETTINGS, simulator = rightFails),
     // Settings.
     Case("settings-desktop-dark", 1120, 760, 1f, AppTheme.DARK, Screen.SETTINGS),
     Case(
@@ -483,12 +497,14 @@ fun main(args: Array<String>) {
             val platform = desktopPlatform(File(settingsDir, "unused.txt"), case.catalog, sessionsDir)
             val desktop = platform.devices
             val devices = DeviceFactory { foot: Foot, choice: DeviceChoice ->
-                if (choice is DeviceChoice.Bluetooth &&
-                    case.bluetooth != null
-                ) {
-                    case.bluetooth
-                } else {
-                    desktop.create(foot, choice)
+                val sim = case.simulator
+                when {
+                    choice is DeviceChoice.Bluetooth && case.bluetooth != null -> case.bluetooth
+
+                    choice is DeviceChoice.Simulator && sim != null ->
+                        DeviceResult.Ready(simulatorTransport(foot, choice, renderClock) { sim(foot, it) })
+
+                    else -> desktop.create(foot, choice)
                 }
             }
             val controller = LiveController(settings, devices, scope)
@@ -585,6 +601,9 @@ fun main(args: Array<String>) {
 }
 
 private const val DEMO_ID = "2026-11-13_14-05-22"
+
+private val renderStart = System.nanoTime()
+private val renderClock: () -> Long = { System.nanoTime() - renderStart }
 
 /** A 60 s walk of both feet at 200 Hz with two markers, and two shorter recordings, made by the simulator. */
 private fun writeDemoSessions(dir: File) {

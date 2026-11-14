@@ -70,10 +70,12 @@ fun interface DeviceFactory {
         /**
          * The simulator on every platform; [hardware] handles the real devices this platform supports and returns
          * [DeviceResult.Unavailable] for the others. [check] is consulted for real devices before [hardware] and
-         * before every connect.
+         * before every connect. [simulatorConfig] adjusts every simulator's config (development: a simulated
+         * link that drops, see `SMARTSOCKS_SIM_DROP_AFTER` in the desktop app).
          */
         fun withSimulator(
             check: (DeviceChoice) -> DeviceResult.Unavailable? = { null },
+            simulatorConfig: (SimConfig) -> SimConfig = { it },
             hardware: (Foot, DeviceChoice) -> DeviceResult,
         ): DeviceFactory {
             val clock = TimeSource.Monotonic.markNow()
@@ -81,7 +83,10 @@ fun interface DeviceFactory {
             return object : DeviceFactory {
                 override fun create(foot: Foot, choice: DeviceChoice): DeviceResult = when (choice) {
                     DeviceChoice.None -> DeviceResult.Unavailable("No device selected")
-                    is DeviceChoice.Simulator -> DeviceResult.Ready(simulatorTransport(foot, choice, clockNanos))
+
+                    is DeviceChoice.Simulator ->
+                        DeviceResult.Ready(simulatorTransport(foot, choice, clockNanos, simulatorConfig))
+
                     else -> check(choice) ?: hardware(foot, choice)
                 }
 
@@ -102,9 +107,10 @@ fun simulatorTransport(
     foot: Foot,
     choice: DeviceChoice.Simulator,
     clockNanos: (() -> Long)? = null,
+    adjust: (SimConfig) -> SimConfig = { it },
 ): SimulatedSockTransport {
     val config = SimConfig(mode = choice.mode)
-    return SimulatedSockTransport(foot, if (choice.preloaded) config.preloadedInsole() else config, clockNanos)
+    return SimulatedSockTransport(foot, adjust(if (choice.preloaded) config.preloadedInsole() else config), clockNanos)
 }
 
 /** The standard message for a device kind this platform has no transport for. */

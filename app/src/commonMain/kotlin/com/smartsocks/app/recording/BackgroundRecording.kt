@@ -1,19 +1,24 @@
 package com.smartsocks.app.recording
 
+import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveController
 import com.smartsocks.app.ui.feetText
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.settings.DeviceChoice
 import com.smartsocks.core.settings.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
 import kotlin.concurrent.Volatile
@@ -85,7 +90,10 @@ enum class BackgroundAction {
     /** The recording cannot go on in the background: finalize it ([StopReason.Background]), then pause. */
     StopForBackground,
 
-    /** In the background no recorded foot is linked (any more): finalize ([StopReason.LinksLost]), then pause. */
+    /**
+     * In the background no recorded foot is linked (any more) or reconnecting (for not too long): finalize
+     * ([StopReason.LinksLost]), then pause.
+     */
     StopLinksLost,
 }
 
@@ -93,7 +101,8 @@ enum class BackgroundAction {
 object BackgroundPolicy {
     /**
      * [recording]: a recording is starting or running (not stopping). [keptAlive]: the platform keeps the process
-     * running in the background for it. [recordedLinksUp]: some recorded foot is connecting or streaming.
+     * running in the background for it. [recordedLinksUp]: some recorded foot is streaming, or on its way back
+     * (connecting, or waiting to reconnect, and not for longer than [BackgroundRecording.RECONNECT_GIVE_UP_MILLIS]).
      */
     fun decide(
         foreground: Boolean,
@@ -142,7 +151,12 @@ class StartedScreens(private val onChange: (foreground: Boolean) -> Unit) {
  * - no recording: pause the feet;
  * - recording, but not kept alive (the platform refused, or it ended): finalize the recording, then pause;
  * - recording and kept alive: only the recorded feet stream, until the user stops (UI or [perform]), or no recorded
- *   foot is linked (a link does not reconnect by itself): then finalize ([StopReason.LinksLost]) and pause.
+ *   foot is linked: then finalize ([StopReason.LinksLost]) and pause. A foot that is reconnecting
+ *   ([LinkState.Reconnecting], or connecting again) still counts as linked, so a drop of both feet at once does not
+ *   end the recording; but if no recorded foot has streamed for [RECONNECT_GIVE_UP_MILLIS] in the background, the
+ *   recording is finalized all the same: a sock that long gone is out of range or off, and an endless background
+ *   recording of nothing would only drain the battery. A foot that cannot come back without the user (reconnect
+ *   off, Bluetooth off, permission revoked) does not count.
  *
  * Until the first [onForeground] the policy pauses the feet (create [live] `initiallyPaused`, so that nothing
  * connects before). The owner (Android: the Application object) outlives the activity, so do [live], [recorder]
@@ -248,11 +262,43 @@ class BackgroundRecording(
         return keepAliveType(feet.map { s.device(it) }, bluetoothPermission())
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun applyPolicy() {
-        val linksUp = combine(live.left.status, live.right.status, recorder.state) { l, r, state ->
+        val health = combine(live.left.status, live.right.status, recorder.state) { l, r, state ->
             val feet = (state as? RecordingState.Recording)?.feet ?: Foot.entries.toSet()
-            (Foot.LEFT in feet && l.state.isActive) || (Foot.RIGHT in feet && r.state.isActive)
+            val recorded = listOfNotNull(l.takeIf { Foot.LEFT in feet }, r.takeIf { Foot.RIGHT in feet })
+            when {
+                recorded.any { it.state == LinkState.Streaming } -> LinksHealth.Streaming
+                recorded.any { it.state.isRecovering } -> LinksHealth.Recovering
+                else -> LinksHealth.Down
+            }
         }.distinctUntilChanged()
+        // Recovering counts as up, in the background only for so long. Down counts only once it lasts
+        // [DOWN_GRACE_MILLIS]: the two feet's states arrive separately, and a foot passes through "down" for a moment
+        // when it is disconnected and connected again at once.
+        var up: Boolean? = null
+        val linksUp = combine(health, foreground) { h, fg -> h to fg }
+            .distinctUntilChanged()
+            .transformLatest { (h, fg) ->
+                when (h) {
+                    LinksHealth.Streaming -> emit(true)
+
+                    LinksHealth.Recovering -> {
+                        emit(true)
+                        if (!fg) {
+                            delay(RECONNECT_GIVE_UP_MILLIS)
+                            emit(false)
+                        }
+                    }
+
+                    LinksHealth.Down -> {
+                        if (up == true) delay(DOWN_GRACE_MILLIS)
+                        emit(false)
+                    }
+                }
+            }
+            .onEach { up = it }
+            .distinctUntilChanged()
         val recording = recorder.state
             .map { it == RecordingState.Starting || it is RecordingState.Recording }
             .distinctUntilChanged()
@@ -283,7 +329,18 @@ class BackgroundRecording(
         live.setPaused(true)
     }
 
+    private enum class LinksHealth { Streaming, Recovering, Down }
+
     companion object {
+        /**
+         * In the background, a recording whose feet are all reconnecting (none streams) is finalized after this
+         * long; see [BackgroundRecording].
+         */
+        const val RECONNECT_GIVE_UP_MILLIS = 5 * 60_000L
+
+        /** No recorded foot linked or on its way back counts only after this long (a blip does not end a recording). */
+        const val DOWN_GRACE_MILLIS = 1_500L
+
         /** Between two posts of the notification at least this long. */
         const val NOTIFICATION_GAP_MILLIS = 1_000L
 

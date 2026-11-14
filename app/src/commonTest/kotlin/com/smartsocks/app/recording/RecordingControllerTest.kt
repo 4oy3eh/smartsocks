@@ -2,6 +2,8 @@ package com.smartsocks.app.recording
 
 import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveController
+import com.smartsocks.app.live.TestSocks
+import com.smartsocks.app.live.noJitter
 import com.smartsocks.app.platform.DeviceFactory
 import com.smartsocks.app.platform.DeviceResult
 import com.smartsocks.app.platform.simulatorTransport
@@ -37,6 +39,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /** Runs work on [inner] while [open]; otherwise holds it until [release]. */
@@ -82,7 +85,9 @@ class RecordingControllerTest {
         scope: CoroutineScope = backgroundScope,
     ): Fixture {
         val settings = SettingsRepository(InMemorySettingsStore(SettingsCodec.encode(initial)), backgroundScope)
-        val live = LiveController(settings, simulators, backgroundScope) { testScheduler.currentTime * 1_000_000 }
+        val live = LiveController(settings, simulators, backgroundScope, reconnectDelayMillis = noJitter) {
+            testScheduler.currentTime * 1_000_000
+        }
         val recorder = RecordingController(live, store, settings, scope, io, queueCapacity)
         return Fixture(live, recorder, store, settings)
     }
@@ -205,6 +210,44 @@ class RecordingControllerTest {
         // About 2 s before and 2.2 s after the gap.
         assertEquals(420.0, left.size.toDouble(), 25.0)
         assertEquals(600.0, timeline.track(Foot.RIGHT).size.toDouble(), 10.0)
+    }
+
+    @Test
+    fun anAutomaticReconnectGoesOnIntoTheSameFileWithAGapAndNoDuplicates() = runTest {
+        // The left foot's link drops once and comes back by itself; the right foot streams throughout.
+        val socks = TestSocks({ testScheduler.currentTime })
+        val settings = SettingsRepository(InMemorySettingsStore(SettingsCodec.encode(AppSettings())), backgroundScope)
+        val live = LiveController(settings, socks, backgroundScope, reconnectDelayMillis = noJitter) {
+            testScheduler.currentTime * 1_000_000
+        }
+        val store = MemorySessionStore()
+        val recorder =
+            RecordingController(live, store, settings, backgroundScope, StandardTestDispatcher(testScheduler))
+        advance(1_000)
+        assertTrue(recorder.start())
+        advance(1_000)
+        socks.latest(Foot.LEFT).drop()
+        advance(50)
+        assertIs<LinkState.Reconnecting>(live.left.status.value.state)
+        assertIs<RecordingState.Recording>(recorder.state.value, "a drop does not end the recording")
+        advance(1_450) // reconnected after 1 s + 400 ms
+        assertEquals(LinkState.Streaming, live.left.status.value.state)
+        val session = live.left.session.value
+        advance(2_000)
+        recorder.stopAndJoin()
+        assertSame(session, live.left.session.value, "reconnected, not rebuilt")
+
+        val timeline = SessionTimeline.read(store.lines(store.entries.keys.single()))
+        val left = timeline.track(Foot.LEFT)
+        val times = (0 until left.size).map { left.timeAt(it) }
+        assertEquals(times.sorted(), times, "in order")
+        assertEquals(times.size, times.toSet().size, "no sample twice")
+        val gaps = times.zipWithNext { a, b -> b - a }.filter { it > 100 }
+        assertEquals(1, gaps.size, "one gap: $gaps")
+        assertTrue(gaps.single() in 1_300.0..1_600.0, "the wait plus the reconnect: ${gaps.single()}")
+        // About 1 s before the drop and 2.1 s after the reconnect, at 100 Hz.
+        assertEquals(310.0, left.size.toDouble(), 20.0)
+        assertEquals(450.0, timeline.track(Foot.RIGHT).size.toDouble(), 10.0)
     }
 
     @Test

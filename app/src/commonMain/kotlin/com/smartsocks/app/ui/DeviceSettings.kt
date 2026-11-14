@@ -139,8 +139,18 @@ internal fun FootDeviceCard(
             Text(foot.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
             LinkButton(status, onToggle = { link.toggle() }, actions = actions)
         }
-        LinkStatusLine(status, Modifier.padding(top = 2.dp, bottom = if (status.pendingConnect) 0.dp else 14.dp))
-        if (status.pendingConnect) {
+        val reconnecting = status.state as? LinkState.Reconnecting
+        val actionBelow = status.pendingConnect || reconnecting != null
+        LinkStatusLine(status, Modifier.padding(top = 2.dp, bottom = if (actionBelow) 0.dp else 14.dp))
+        if (reconnecting != null) {
+            reconnecting.lastError?.let {
+                Hint("Last error: $it", modifier = Modifier.padding(start = 16.dp, top = 2.dp))
+            }
+            // Skip the wait; Disconnect (above) calls the retries off.
+            TextButton(onClick = link::retryNow, modifier = Modifier.padding(bottom = 4.dp)) {
+                Text("Retry now")
+            }
+        } else if (status.pendingConnect) {
             // The connect waits for the fix; let the user call it off.
             TextButton(onClick = link::disconnect, modifier = Modifier.padding(bottom = 4.dp)) {
                 Text("Don't connect")
@@ -251,7 +261,7 @@ private val DeviceChoice.shortTitle: String
 private fun LinkButton(status: FootStatus, onToggle: () -> Unit, actions: DeviceActions) {
     val state = status.state
     when {
-        state.isActive -> OutlinedButton(onClick = onToggle) { Text("Disconnect") }
+        state.isActive || state is LinkState.Reconnecting -> OutlinedButton(onClick = onToggle) { Text("Disconnect") }
 
         state is LinkState.Unavailable && state.reason == UnavailableReason.PermissionNeeded -> {
             val blocked by actions.bluetoothPermissionBlocked.collectAsState()

@@ -8,6 +8,7 @@ import com.smartsocks.core.session.StreamSettings
 import com.smartsocks.core.sim.SimMode
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class SettingsCodecTest {
@@ -29,6 +30,7 @@ class SettingsCodecTest {
         chart = ChartSettings(ChartWindow.SECONDS_30, Foot.RIGHT),
         recording = RecordingSettings(saveRaw = false),
         autoConnect = false,
+        autoReconnect = false,
     )
 
     private fun roundTrip(settings: AppSettings) = SettingsCodec.decode(SettingsCodec.encode(settings))
@@ -46,7 +48,19 @@ class SettingsCodecTest {
         assertEquals(LiveView.COP, d.liveView)
         assertEquals(ChartSettings(ChartWindow.SECONDS_10, Foot.LEFT), d.chart)
         assertTrue(d.autoConnect)
+        assertTrue(d.autoReconnect)
         assertTrue(d.recording.saveRaw)
+    }
+
+    @Test
+    fun `auto reconnect is on unless explicitly off`() {
+        assertFalse(roundTrip(AppSettings(autoReconnect = false)).autoReconnect)
+        assertTrue(roundTrip(AppSettings(autoReconnect = true)).autoReconnect)
+        // Files written before the setting existed, and garbage values: the default (on).
+        assertTrue(SettingsCodec.decode(withVersion("autoConnect=false")).autoReconnect)
+        assertTrue(SettingsCodec.decode(withVersion("autoReconnect=sometimes")).autoReconnect)
+        assertFalse(SettingsCodec.decode(withVersion("autoReconnect= FALSE ")).autoReconnect)
+        assertEquals(AppSettings(autoReconnect = false), SettingsCodec.decode(withVersion("autoReconnect=false")))
     }
 
     @Test

@@ -25,6 +25,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,9 +40,11 @@ import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.concurrent.Volatile
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.random.Random
 import kotlin.time.TimeSource
 
 /** What the UI shows about one foot's link. */
@@ -68,8 +72,20 @@ sealed interface LinkState {
     /** The link failed or was closed by the device; [reason] says why. */
     data class Disconnected(val reason: String?) : LinkState
 
+    /**
+     * The link dropped (or did not open) while the foot is meant to be connected, and [AppSettings.autoReconnect] is
+     * on: retry number [attempt] starts in [secondsLeft] seconds (counting down once a second, see
+     * [ReconnectBackoff]). While the retry itself connects, the foot shows [Connecting] / [Configuring] as usual.
+     * [lastError] is why the previous attempt ended. [LiveController.FootLink.disconnect] calls it off,
+     * [LiveController.FootLink.retryNow] skips the wait.
+     */
+    data class Reconnecting(val attempt: Int, val secondsLeft: Int, val lastError: String?) : LinkState
+
     /** Connecting, configuring or streaming. */
     val isActive: Boolean get() = this == Connecting || this == Configuring || this == Streaming
+
+    /** Meant to be linked and on the way there: connecting, configuring, or waiting to reconnect. */
+    val isRecovering: Boolean get() = this == Connecting || this == Configuring || this is Reconnecting
 
     /** Connecting is possible from here. */
     val canConnect: Boolean get() = this == Idle || this is Disconnected
@@ -118,12 +134,19 @@ data class FootStatus(
  * settings are applied to the running sessions (baseline kept), a simulator mode change to the running simulator.
  *
  * Connects automatically on start if [AppSettings.autoConnect]; afterwards only on [FootLink.connect]. A link that
- * fails or drops stays down (no automatic reconnect), and so does a foot whose device is unusable: a later settings
- * change does not connect it by surprise. Exception: a device that is only unavailable for a fixable reason (missing
- * permission, Bluetooth off; checked when the session is built and before every connect) keeps the pending
- * connect, and [recheckDevices] (called when the user may have fixed it) connects it; choosing another device
- * drops that pending connect. If both feet name the same sock, the right foot is unavailable
- * ([UnavailableReason.InUse]).
+ * fails to open or drops while the foot is meant to be connected is retried if [AppSettings.autoReconnect]:
+ * [LinkState.Reconnecting] waits [ReconnectBackoff.delayMillis] (1 s, 2 s, 4 s … 30 s, as long as the connection is
+ * wanted; back to 1 s after a link that streamed [ReconnectBackoff.STABLE_MILLIS]), then the same session runs
+ * again. The retries end with [FootLink.disconnect], a device or stream change (new session: it connects at once,
+ * as any rebuild of a wanted foot), a pause (un-pausing connects at once), [shutdown], the setting switched off,
+ * or a device check that fails before a retry (Bluetooth off etc., below). With the setting off a link that fails
+ * or drops stays down until asked again.
+ *
+ * A foot whose device is unusable stays down too: a later settings change does not connect it by surprise.
+ * Exception: a device that is only unavailable for a fixable reason (missing permission, Bluetooth off; checked when
+ * the session is built and before every connect and retry) keeps the pending connect, and [recheckDevices] (called
+ * when the user may have fixed it) connects it; choosing another device drops that pending connect. If both feet
+ * name the same sock, the right foot is unavailable ([UnavailableReason.InUse]).
  *
  * An explicit calibration survives a session rebuild that keeps the sock (by its identity: port or address, not
  * its display name) and the measurement range (e.g. a new sample rate).
@@ -131,12 +154,15 @@ data class FootStatus(
  * Streaming runs in [scope] independently of the UI; the UI calls [sample] once per frame. Every sample of both
  * feet also goes into [history] (for the charts), from the stream's own coroutines. Both feet share [clockNanos]
  * (pass a virtual one only in tests); [nowNanos] reads it, on the time axis of the samples' timestamps.
+ * [reconnectDelayMillis] gives the wait before a retry at a [ReconnectBackoff.Progress.step] (by default with
+ * random jitter); tests pass a deterministic one.
  */
 class LiveController(
     private val settings: SettingsRepository,
     private val devices: DeviceFactory,
     scope: CoroutineScope,
     initiallyPaused: Boolean = false,
+    private val reconnectDelayMillis: (step: Int) -> Long = { ReconnectBackoff.delayMillis(it, Random.nextDouble()) },
     private val clockNanos: () -> Long = monotonicNanos(),
 ) {
     private val job = SupervisorJob(scope.coroutineContext[Job])
@@ -280,8 +306,22 @@ class LiveController(
 
         private val pausedHere = _pausedFeet.map { foot in it }.distinctUntilChanged()
 
-        /** The foot is meant to be connected (it may still be connecting, or paused). */
+        /** The foot is meant to be connected (it may still be connecting, reconnecting, or paused). */
         val wantsConnection: Boolean get() = request.value?.connect == true
+
+        /**
+         * Non-null while [keepConnected] runs and may still retry: the session's "down" states (idle, disconnected)
+         * then show as on the way back, never as down, whatever order the status sees its inputs change in.
+         */
+        private val loop = MutableStateFlow<RetryLoop?>(null)
+
+        /** Bumped by [retryNow]. */
+        private val retryNowRequests = MutableStateFlow(0)
+
+        /** While [LinkState.Reconnecting]: retry at once instead of waiting out the countdown. Ignored otherwise. */
+        fun retryNow() {
+            if (loop.value?.waiting != null) retryNowRequests.update { it + 1 }
+        }
 
         /** Ignored when the device is unusable or a connection is already wanted. */
         fun connect() {
@@ -514,21 +554,14 @@ class LiveController(
                             session.stats.map(LinkRate::of).distinctUntilChanged(),
                             combine(request, pausedHere) { req, paused -> req?.connect == true && !paused },
                             settings.settings.map { it.device(foot) }.distinctUntilChanged(),
-                        ) { connection, rate, wanted, shown ->
-                            FootStatus(foot, shown, session.displayName, connection.toLinkState(wanted), rate)
+                            loop,
+                        ) { connection, rate, wanted, shown, retry ->
+                            FootStatus(foot, shown, session.displayName, linkState(connection, wanted, retry), rate)
                         }.collect { _status.value = it }
                     }
                     combine(request.filterNotNull(), pausedHere) { req, paused -> req to paused }
                         .collectLatest { (req, paused) ->
-                            if (req.connect && !paused) {
-                                // Bluetooth switched off (or the permission revoked) since the session was built.
-                                devices.check(foot, device)?.let { throw DeviceBlocked(it) }
-                                // Whatever came before (another run, another session) is not joined to this run.
-                                footHistory.markBreak()
-                                session.run()
-                                // The link ended by itself (failure, drop): it stays down until asked again.
-                                request.compareAndSet(req, Request(false, req.nextId))
-                            }
+                            if (req.connect && !paused) keepConnected(req, session, device, footHistory)
                         }
                 }
             } catch (e: DeviceBlocked) {
@@ -538,6 +571,108 @@ class LiveController(
                 _session.compareAndSet(session, null)
             }
         }
+
+        /**
+         * Runs [session] for [req] and, while [AppSettings.autoReconnect] is on, again after every drop or failed
+         * open, with [ReconnectBackoff] waits in between. Returns once the link ended and no retry follows; then the
+         * request is dropped (the foot stays down until asked again). Cancelled by a new request, a pause or a new
+         * config; throws [DeviceBlocked] if the device check before a try, or right after a link ended, fails.
+         */
+        private suspend fun keepConnected(
+            req: Request,
+            session: SockSession,
+            device: DeviceChoice,
+            footHistory: FootHistory,
+        ) {
+            val job = currentCoroutineContext()[Job]
+            var progress = ReconnectBackoff.Progress()
+            try {
+                while (true) {
+                    // Shown as connecting from here, also before the session itself says so.
+                    loop.value = RetryLoop(null)
+                    // Bluetooth switched off (or the permission revoked) since the session was built or the last try.
+                    checkDevice(device)?.let { throw DeviceBlocked(it) }
+                    // Whatever came before (another run, another session) is not joined to this run.
+                    footHistory.markBreak()
+                    var blocked: DeviceResult.Unavailable? = null
+                    var planned: PlannedRetry? = null
+                    coroutineScope {
+                        val since = StreamingSince()
+                        val watch = launch(start = CoroutineStart.UNDISPATCHED) {
+                            session.connection.first { it == ConnectionState.Streaming }
+                            since.nanos = clockNanos()
+                        }
+                        // The link ended by itself (failure, drop), or the run was cancelled. Decided here, before
+                        // the session shows it as down, so that the status goes straight to "reconnecting".
+                        session.run { reason ->
+                            if (job?.isActive != true) return@run
+                            blocked = checkDevice(device)
+                            if (blocked != null || !settings.settings.value.autoReconnect) {
+                                loop.value = null // down for good: shown as it is
+                                return@run
+                            }
+                            val streamed = since.nanos.takeIf { it >= 0 }?.let { (clockNanos() - it) / 1_000_000 }
+                            progress = progress.next(streamed)
+                            val wait = reconnectDelayMillis(progress.step)
+                            val state = LinkState.Reconnecting(
+                                progress.attempt,
+                                ReconnectBackoff.secondsLeft(wait),
+                                reason,
+                            )
+                            // Before the state is shown: a "retry now" from then on counts.
+                            planned = PlannedRetry(state, wait, retryNowRequests.value)
+                            loop.value = RetryLoop(state)
+                        }
+                        watch.cancel()
+                    }
+                    currentCoroutineContext().ensureActive()
+                    blocked?.let { throw DeviceBlocked(it) }
+                    if (!awaitRetry(planned ?: break)) break
+                }
+                request.compareAndSet(req, Request(false, req.nextId))
+            } finally {
+                loop.value = null
+            }
+        }
+
+        /** [DeviceFactory.check], with a failure of the check itself as a reason not to connect. */
+        private fun checkDevice(device: DeviceChoice): DeviceResult.Unavailable? = try {
+            devices.check(foot, device)
+        } catch (e: Exception) {
+            DeviceResult.Unavailable(e.message ?: "Cannot check the device")
+        }
+
+        /**
+         * Shows [LinkState.Reconnecting] counting down [PlannedRetry.waitMillis] in whole seconds. Returns early on
+         * [retryNow] (one since [PlannedRetry.retryNowSeen]) or when [AppSettings.autoReconnect] goes off; true if
+         * the retry should go ahead.
+         */
+        private suspend fun awaitRetry(planned: PlannedRetry): Boolean {
+            val seen = planned.retryNowSeen
+            val interrupted = combine(retryNowRequests, settings.settings) { n, s -> n != seen || !s.autoReconnect }
+            var remaining = planned.waitMillis
+            while (remaining > 0) {
+                val seconds = ReconnectBackoff.secondsLeft(remaining)
+                loop.value = RetryLoop(planned.state.copy(secondsLeft = seconds))
+                // Up to the next whole second of the countdown.
+                val step = remaining - (seconds - 1) * 1_000L
+                if (withTimeoutOrNull(step) { interrupted.first { it } } != null) break
+                remaining -= step
+            }
+            return settings.settings.value.autoReconnect
+        }
+    }
+
+    /** [FootLink.keepConnected] is running and may retry; [waiting]: it is waiting for the next try. */
+    private data class RetryLoop(val waiting: LinkState.Reconnecting?)
+
+    /** A retry decided when a link ended: what to show, how long to wait, the [FootLink.retryNow] count then. */
+    private class PlannedRetry(val state: LinkState.Reconnecting, val waitMillis: Long, val retryNowSeen: Int)
+
+    /** When the current run reached [ConnectionState.Streaming], on the controller's clock; -1: not (yet). */
+    private class StreamingSince {
+        @Volatile
+        var nanos = -1L
     }
 
     /** Thrown out of a session's coroutines to turn the foot unavailable. */
@@ -583,6 +718,16 @@ class LiveController(
         private fun quantize(progress: Double): Double = (progress * 50).toInt().coerceIn(0, 50) / 50.0
 
         private fun DeviceResult.Unavailable.toLinkState() = LinkState.Unavailable(message, reason)
+
+        /**
+         * The foot's state from its session's [connection]. While [loop] runs for a [wanted] connection the session
+         * is never shown as down: that is the moment between two tries (waiting, or about to connect).
+         */
+        private fun linkState(connection: ConnectionState, wanted: Boolean, loop: RetryLoop?): LinkState {
+            val down = connection == ConnectionState.Idle || connection is ConnectionState.Disconnected
+            if (wanted && down && loop != null) return loop.waiting ?: LinkState.Connecting
+            return connection.toLinkState(wanted)
+        }
 
         private fun monotonicNanos(): () -> Long {
             val start = TimeSource.Monotonic.markNow()

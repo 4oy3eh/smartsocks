@@ -11,6 +11,9 @@ internal class JSerialPortHandle(
     @Volatile
     private var port: SerialPort? = null
 
+    @Volatile
+    private var closed = false
+
     override fun open() {
         val p = try {
             SerialPort.getCommPort(portName)
@@ -19,10 +22,17 @@ internal class JSerialPortHandle(
         }
         p.setComPortParameters(baudRate, 8, SerialPort.ONE_STOP_BIT, SerialPort.NO_PARITY)
         p.setComPortTimeouts(SerialPort.TIMEOUT_READ_SEMI_BLOCKING, readTimeoutMillis, 0)
+        // Known before the (possibly long) open, so that close() can close it whatever happens.
+        port = p
+        if (closed) throw IOException("Serial port '$portName' was closed while opening")
         if (!p.openPort()) {
             throw IOException("Cannot open serial port '$portName' (in use, unpaired or out of range?)")
         }
-        port = p
+        // Closed while the open blocked: close() may have come before the port was open.
+        if (closed) {
+            p.closePort()
+            throw IOException("Serial port '$portName' was closed while opening")
+        }
     }
 
     override fun read(buffer: ByteArray): Int {
@@ -44,6 +54,7 @@ internal class JSerialPortHandle(
     override fun bytesAvailable(): Int = port?.takeIf { it.isOpen }?.bytesAvailable() ?: -1
 
     override fun close() {
+        closed = true
         port?.closePort()
     }
 }

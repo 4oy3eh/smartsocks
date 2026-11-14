@@ -200,6 +200,14 @@ private fun GeneralSection(settings: AppSettings, onChange: ((AppSettings) -> Ap
             checked = settings.autoConnect,
             onCheckedChange = { on -> onChange { it.copy(autoConnect = on) } },
         )
+        Spacer(Modifier.height(10.dp))
+        SwitchRow(
+            title = "Reconnect automatically",
+            description = "When a foot's link drops or fails to open, try again: after 1 s, then waiting twice as " +
+                "long each time, up to 30 s, until it connects or you disconnect it.",
+            checked = settings.autoReconnect,
+            onCheckedChange = { on -> onChange { it.copy(autoReconnect = on) } },
+        )
         HorizontalDivider(Modifier.padding(vertical = 14.dp), color = MaterialTheme.colorScheme.outlineVariant)
         About()
     }

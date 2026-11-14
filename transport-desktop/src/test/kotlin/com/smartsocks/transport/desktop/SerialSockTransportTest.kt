@@ -2,9 +2,13 @@ package com.smartsocks.transport.desktop
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -16,14 +20,25 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-private class FakeHandle(private val openError: Exception? = null) : PortHandle {
+private class FakeHandle(
+    private val openError: Exception? = null,
+    /** open() blocks until this opens (an SPP link to a sock out of range); it does not react to close(). */
+    private val openGate: CountDownLatch? = null,
+) : PortHandle {
     val incoming = LinkedBlockingQueue<Byte>()
     val written = LinkedBlockingQueue<ByteArray>()
     private val closed = AtomicBoolean(false)
     val closeCalls = AtomicInteger()
 
+    val openReturned = CountDownLatch(1)
+
     override fun open() {
-        openError?.let { throw it }
+        try {
+            openGate?.await()
+            openError?.let { throw it }
+        } finally {
+            openReturned.countDown()
+        }
     }
 
     override fun read(buffer: ByteArray): Int {
@@ -164,6 +179,40 @@ class SerialSockTransportTest {
         assertTrue(e.message!!.contains("COM9"))
         val e2 = assertFailsWith<IOException> { transport(FakeHandle(IllegalStateException("boom"))).open() }
         assertTrue(e2.message!!.contains("COM9") && e2.message!!.contains("boom"))
+    }
+
+    @Test
+    fun aCancelledOpenReturnsAtOnceAndThePortIsClosedOnceTheOpenReturns() = runBlocking {
+        val gate = CountDownLatch(1)
+        val h = FakeHandle(openGate = gate)
+        val t = transport(h)
+        val opening = launch(Dispatchers.Default) { t.open() }
+        Thread.sleep(100)
+        assertTrue(opening.isActive, "the open blocks")
+        withTimeout(1_000) { opening.cancelAndJoin() }
+        assertEquals(0, h.closeCalls.get(), "not closed under the pending open")
+
+        gate.countDown()
+        assertTrue(h.openReturned.await(2, TimeUnit.SECONDS))
+        withTimeout(2_000) { while (h.closeCalls.get() == 0) delay(10) }
+        assertEquals(-1, t.read(ByteArray(4)))
+        t.open() // not "already open": a retry can follow
+        t.close()
+    }
+
+    @Test
+    fun closeDuringABlockedOpenEndsTheOpenAtOnce() = runBlocking {
+        val gate = CountDownLatch(1)
+        val h = FakeHandle(openGate = gate)
+        val t = transport(h)
+        val opening = async(Dispatchers.Default) { runCatching { t.open() } }
+        Thread.sleep(100)
+        withTimeout(1_000) { t.close() }
+        val failure = withTimeout(1_000) { opening.await() }.exceptionOrNull()
+        assertTrue(failure is IOException, "$failure")
+        gate.countDown()
+        withTimeout(2_000) { while (h.closeCalls.get() == 0) delay(10) }
+        assertEquals(1, h.closeCalls.get())
     }
 
     @Test

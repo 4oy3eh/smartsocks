@@ -65,6 +65,7 @@ object SettingsCodec {
         put("chart.sensorFoot", settings.chart.sensorFoot.name)
         put("recording.saveRaw", settings.recording.saveRaw)
         put("autoConnect", settings.autoConnect)
+        put("autoReconnect", settings.autoReconnect)
         return out.toString()
     }
 
@@ -101,6 +102,7 @@ object SettingsCodec {
             ),
             recording = RecordingSettings(saveRaw = boolean("recording.saveRaw", defaults.recording.saveRaw)),
             autoConnect = boolean("autoConnect", defaults.autoConnect),
+            autoReconnect = boolean("autoReconnect", defaults.autoReconnect),
         )
 
         private fun device(foot: Foot): DeviceChoice {

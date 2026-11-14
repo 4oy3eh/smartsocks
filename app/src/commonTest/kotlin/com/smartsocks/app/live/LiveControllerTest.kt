@@ -81,7 +81,9 @@ class LiveControllerTest {
     )
 
     private fun TestScope.controller(settings: SettingsRepository, devices: DeviceFactory) =
-        LiveController(settings, devices, backgroundScope) { testScheduler.currentTime * 1_000_000 }
+        LiveController(settings, devices, backgroundScope, reconnectDelayMillis = noJitter) {
+            testScheduler.currentTime * 1_000_000
+        }
 
     private fun TestScope.repository(initial: AppSettings) =
         SettingsRepository(InMemorySettingsStore(SettingsCodec.encode(initial)), backgroundScope)
@@ -239,9 +241,9 @@ class LiveControllerTest {
     }
 
     @Test
-    fun aLinkDropIsReportedAndConnectTriesAgain() = runTest {
+    fun withoutAutoReconnectALinkDropIsReportedAndConnectTriesAgain() = runTest {
         val transports = mutableListOf<SimulatedSockTransport>()
-        val controller = controller(repository(AppSettings())) { foot, _ ->
+        val controller = controller(repository(AppSettings(autoReconnect = false))) { foot, _ ->
             DeviceResult.Ready(
                 SimulatedSockTransport(foot, SimConfig(disconnectAfterPackets = 20)).also { transports += it },
             )
@@ -258,9 +260,9 @@ class LiveControllerTest {
     }
 
     @Test
-    fun aDroppedLinkIsNotReconnectedByALaterSettingsChange() = runTest {
+    fun withoutAutoReconnectADroppedLinkIsNotReconnectedByALaterSettingsChange() = runTest {
         var drop = true
-        val settings = repository(AppSettings())
+        val settings = repository(AppSettings(autoReconnect = false))
         val controller = controller(settings) { foot, _ ->
             DeviceResult.Ready(SimulatedSockTransport(foot, SimConfig(disconnectAfterPackets = if (drop) 20 else null)))
         }

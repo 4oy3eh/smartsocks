@@ -1,5 +1,6 @@
 package com.smartsocks.app.playback
 
+import com.smartsocks.app.live.LiveGeometry
 import com.smartsocks.app.recording.CountingLines
 import com.smartsocks.app.recording.SessionStore
 import com.smartsocks.app.recording.SessionSummary
@@ -332,6 +333,8 @@ fun loadSession(
             CountingLines(lines, checkCancelled = checkCancelled) { chars ->
                 onProgress((chars.toDouble() / total).toFloat().coerceIn(0f, 1f))
             },
+            // The COP in the app's layout, whatever the recording was made with.
+            LiveGeometry.layout,
         )
     }
     checkCancelled()

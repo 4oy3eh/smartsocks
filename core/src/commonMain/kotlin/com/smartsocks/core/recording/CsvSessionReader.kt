@@ -1,8 +1,10 @@
 package com.smartsocks.core.recording
 
 import com.smartsocks.core.analytics.BaselineSource
+import com.smartsocks.core.analytics.CenterOfPressure
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.Point
+import com.smartsocks.core.model.SensorLayout
 import com.smartsocks.core.protocol.SENSOR_COUNT
 
 /** One recorded sample. Mirrors [com.smartsocks.core.analytics.FootState] minus the derived shares. */
@@ -41,22 +43,51 @@ class CsvSessionInfo(
      * order; none in older files.
      */
     val joins: List<CsvFootJoin> = emptyList(),
+    /** The layout the file's COP was recorded with: its `# sensor_layout=` header, else [CsvSessionReader.LAYOUT_BEFORE_HEADER]. */
+    val recordedLayout: SensorLayout = CsvSessionReader.LAYOUT_BEFORE_HEADER,
+    /** What was done to the recorded COP to fit the layout it was read with. */
+    val copConversion: CopConversion = CopConversion.NONE,
 )
+
+/** How [CsvSessionReader] fitted a recording's COP to the layout it reads with. */
+enum class CopConversion {
+    /** Recorded with the same layout: as recorded. */
+    NONE,
+
+    /**
+     * Recorded with the mirror image (medial and lateral swapped): x negated. Exact for the smoothed COP too, since
+     * the COP is linear in the positions and the 1€ filter treats +x and −x alike.
+     */
+    MIRRORED,
+
+    /**
+     * Another layout: both COP columns recomputed from the loads ([CenterOfPressure]); the smoothed one is then the
+     * raw one (the recording's smoothing cannot be redone).
+     */
+    RECOMPUTED,
+}
 
 /**
  * Reads what [CsvRecorder] wrote, in format version 2 and the older version 1 (`calibrated` 1/0 as the baseline).
  * Files without `# foot_joined` lines (all older ones) simply have no late joins. Such a line is only information
  * (the rows are what counts): a malformed one is skipped, and one without a row of its foot after it (a file cut
  * right after it) is not reported.
+ *
+ * The COP columns depend on the sensor layout (see [CsvRecorder]). A file recorded with another layout than the one
+ * it is read with (a file without a `# sensor_layout=` header counts as [LAYOUT_BEFORE_HEADER]) gets its COP
+ * converted row by row, see [CopConversion]; [CsvSessionInfo] says what was done.
  */
 object CsvSessionReader {
+    /** What every recording before the `# sensor_layout=` header was made with: the legacy grid, odd channels medial. */
+    val LAYOUT_BEFORE_HEADER: SensorLayout = SensorLayout.legacy(oddMedial = true)
+
     /**
      * Keeps every row in memory: fine for short recordings. For long ones use [stream].
      * @throws IllegalArgumentException on a missing/unsupported format version or a malformed row.
      */
-    fun read(lines: Iterable<String>): RecordedSession {
+    fun read(lines: Iterable<String>, layout: SensorLayout = SensorLayout.Legacy): RecordedSession {
         val rows = mutableListOf<CsvRow>()
-        val info = stream(lines) { rows += it }
+        val info = stream(lines, layout) { rows += it }
         return RecordedSession(info.header, rows, info.markers, info.joins)
     }
 
@@ -67,10 +98,14 @@ object CsvSessionReader {
      *
      * A malformed row or marker that is the **last** line is dropped ([CsvSessionInfo.truncatedLastLine]): a
      * recording cut short by a crash, or still being written, ends in the middle of a line. Anywhere else it is an
-     * error.
+     * error. [layout]: the layout the COP is delivered in (the app's).
      * @throws IllegalArgumentException as [read]; rows before the bad line have been delivered already.
      */
-    fun stream(lines: Iterable<String>, onRow: (CsvRow) -> Unit): CsvSessionInfo {
+    fun stream(
+        lines: Iterable<String>,
+        layout: SensorLayout = SensorLayout.Legacy,
+        onRow: (CsvRow) -> Unit,
+    ): CsvSessionInfo {
         val header = LinkedHashMap<String, String>()
         val markers = mutableListOf<CsvMarker>()
         val joins = mutableListOf<CsvFootJoin>()
@@ -79,6 +114,8 @@ object CsvSessionReader {
         val reported = BooleanArray(Foot.entries.size)
         var sawColumns = false
         var version = 0
+        var recorded = LAYOUT_BEFORE_HEADER
+        var conversion = CopConversion.NONE
         // A bad line is only an error once another line follows it.
         var pendingError: IllegalArgumentException? = null
 
@@ -110,11 +147,18 @@ object CsvSessionReader {
                     val expected = if (version == 1) CSV_COLUMNS_V1 else CSV_COLUMNS
                     require(line == expected.joinToString(",")) { "Line ${index + 1}: unexpected column header" }
                     sawColumns = true
+                    // A malformed layout line: as if it were missing (the file is otherwise fine).
+                    recorded = header[LAYOUT_KEY]?.let { decodeLayout(it) } ?: LAYOUT_BEFORE_HEADER
+                    conversion = when (recorded) {
+                        layout -> CopConversion.NONE
+                        layout.mirrored() -> CopConversion.MIRRORED
+                        else -> CopConversion.RECOMPUTED
+                    }
                 }
 
                 else -> {
                     val row = try {
-                        parseRow(line, version)
+                        convert(parseRow(line, version), conversion, layout)
                     } catch (e: IllegalArgumentException) {
                         pendingError = IllegalArgumentException("Line ${index + 1}: ${e.message}", e)
                         null
@@ -133,7 +177,50 @@ object CsvSessionReader {
             }
         }
         checkVersion(header)
-        return CsvSessionInfo(header, markers, truncatedLastLine = pendingError != null, joins = joins)
+        return CsvSessionInfo(
+            header,
+            markers,
+            truncatedLastLine = pendingError != null,
+            joins = joins,
+            recordedLayout = recorded,
+            copConversion = conversion,
+        )
+    }
+
+    private fun convert(row: CsvRow, conversion: CopConversion, layout: SensorLayout): CsvRow {
+        val cop: Point?
+        val rawCop: Point?
+        when (conversion) {
+            CopConversion.NONE -> return row
+
+            CopConversion.MIRRORED -> {
+                cop = row.cop?.let { Point(-it.x, it.y) }
+                rawCop = row.rawCop?.let { Point(-it.x, it.y) }
+            }
+
+            CopConversion.RECOMPUTED -> {
+                // Only where the recording had a COP (the foot on the ground); open circuits (NaN loads) count as 0.
+                val loads = DoubleArray(SENSOR_COUNT) { row.loads[it].takeIf { v -> v.isFinite() } ?: 0.0 }
+                val computed = if (row.cop != null || row.rawCop != null) {
+                    CenterOfPressure.compute(loads, layout.positions(row.foot), 0.0)?.position
+                } else {
+                    null
+                }
+                rawCop = if (row.rawCop != null) computed else null
+                cop = if (row.cop != null) computed else null
+            }
+        }
+        return CsvRow(
+            row.tMillis,
+            row.foot,
+            row.resistanceOhms,
+            row.loads,
+            row.totalLoad,
+            cop,
+            rawCop,
+            row.inContact,
+            row.baseline,
+        )
     }
 
     private fun checkVersion(header: Map<String, String>): Int {

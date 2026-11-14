@@ -48,10 +48,11 @@ object SimulatedRecording {
         require(order.isNotEmpty()) { "no feet" }
         val fromStart = feet - joinAtSeconds.keys
         require(fromStart.isNotEmpty()) { "some foot must be recorded from the start" }
-        val csvRecorder = CsvRecorder(csv, RecordingMetadata(startTimeIso, rate, range, fromStart))
+        val csvRecorder =
+            CsvRecorder(csv, RecordingMetadata(startTimeIso, rate, range, fromStart, layout = config.layout))
         val rawRecorder = raw?.let { RawPacketRecorder(it) }
         val sims = order.map { SimulatedSockTransport(it, config.copy(mode = mode)) }
-        val processors = order.map { FootProcessor(it, settings = processorSettings) }
+        val processors = order.map { FootProcessor(it, config.layout, processorSettings) }
         val periodNanos = rate.periodNanos
         val count = (seconds * rate.hz).toLong()
         val pending = markers.sortedBy { it.first }.toMutableList()

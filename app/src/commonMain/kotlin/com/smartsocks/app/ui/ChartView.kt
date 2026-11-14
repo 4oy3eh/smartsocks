@@ -2,6 +2,7 @@ package com.smartsocks.app.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -19,6 +20,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -42,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -54,12 +59,18 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.smartsocks.app.live.AutoScale
 import com.smartsocks.app.live.ChartFrame
@@ -75,9 +86,12 @@ import com.smartsocks.app.live.SensorNames
 import com.smartsocks.app.playback.PlayerController
 import com.smartsocks.app.settings.fixed
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.model.FootRegion
 import com.smartsocks.core.protocol.SENSOR_COUNT
+import com.smartsocks.core.settings.ChartLoad
 import com.smartsocks.core.settings.ChartSettings
 import com.smartsocks.core.settings.ChartWindow
+import com.smartsocks.core.settings.SensorSelection
 import kotlinx.coroutines.flow.first
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -100,11 +114,23 @@ private class ChartModel {
     /** Playhead position relative to the right edge, seconds (playback); null for none. */
     var playheadSeconds: Float? = null
 
-    /** [fitScales]: fit the y scales to this frame at once (paused, or another window or foot), no hysteresis. */
-    fun update(controller: LiveController, nowNanos: Long, seconds: Int, sensorFoot: Foot, fitScales: Boolean) {
-        frame.update(controller.history, nowNanos, seconds)
-        val totalMax = frame.maxTotal()
-        val sensorMax = frame.foot(sensorFoot).maxLoad()
+    /**
+     * The choices [frame] and the scales were made for. The canvases draw by these, not by the composition's: right
+     * after a change the old frame is drawn as it was until the next update, never on the other mode's scale.
+     */
+    var drawn: ChartSettings = ChartSettings()
+        private set
+
+    /**
+     * [fitScales]: fit the y scales to this frame at once (paused, or another window, foot or selection), no
+     * hysteresis.
+     */
+    fun update(controller: LiveController, nowNanos: Long, chart: ChartSettings, fitScales: Boolean) {
+        val mask = chart.sensors.mask
+        drawn = chart
+        frame.update(controller.history, nowNanos, chart.window.seconds, mask)
+        val totalMax = if (chart.load == ChartLoad.SELECTED) frame.maxSelected() else frame.maxTotal()
+        val sensorMax = frame.foot(chart.sensorFoot).maxLoad(mask)
         if (fitScales) {
             total.reset(totalMax)
             sensors.reset(sensorMax)
@@ -115,14 +141,18 @@ private class ChartModel {
     }
 
     /** A playback window around [positionMillis], on scales fixed for the whole session (scrubbing never jumps). */
-    fun update(player: PlayerController, positionMillis: Double, seconds: Int) {
+    fun update(player: PlayerController, positionMillis: Double, chart: ChartSettings) {
+        val seconds = chart.window.seconds
+        val mask = chart.sensors.mask
+        drawn = chart
         val span = seconds * 1000.0
         val end = player.chartWindowEnd(positionMillis, span)
-        frame.update(player.timeline, end, seconds)
+        frame.update(player.timeline, end, seconds, mask)
         endSeconds = end / 1000
         playheadSeconds = ((positionMillis - end) / 1000).toFloat()
-        total.reset(player.overview.maxTotal)
-        sensors.reset(player.overview.maxSensorLoad)
+        val overview = player.overview
+        total.reset(if (chart.load == ChartLoad.SELECTED) overview.maxSelectedLoad(mask) else overview.maxTotal)
+        sensors.reset(overview.maxSensorLoad(mask))
     }
 }
 
@@ -206,8 +236,8 @@ private class ChartColors(
 internal class LegendEntry(val text: String, val muted: Boolean)
 
 /**
- * The live chart: total load per foot, the six sensors of one foot, and the COP's heel-to-toe position, stacked on
- * one time axis that scrolls right to left. It plots the controller's full-rate history: the data is copied once
+ * The live chart: load per foot (the total, or the sum of the selected sensors), the selected sensors of one foot,
+ * and the COP's heel-to-toe position, stacked on one time axis that scrolls right to left. It plots the controller's full-rate history: the data is copied once
  * per frame (only while a foot streams), Pause freezes the picture while recording goes on.
  */
 @Composable
@@ -224,25 +254,22 @@ fun ChartView(
     val model = remember { ChartModel() }
     val tick = remember { mutableIntStateOf(0) }
     val truncated = remember { mutableStateOf(false) }
-    val seconds = chart.window.seconds
-    val sensorFoot = chart.sensorFoot
-
-    LaunchedEffect(controller, paused, seconds, sensorFoot) {
+    LaunchedEffect(controller, paused, chart) {
         if (paused) {
-            // Frozen at the moment of pausing; a new window or foot is re-read from the history at that moment, as
-            // far as it is still there (otherwise the hint below says so).
+            // Frozen at the moment of pausing; a new window, foot or selection is re-read from the history at that
+            // moment, as far as it is still there (otherwise the hint below says so).
             val now = model.frame.nowNanos.takeIf { it != 0L } ?: controller.nowNanos()
-            model.update(controller, now, seconds, sensorFoot, fitScales = true)
+            model.update(controller, now, chart, fitScales = true)
             truncated.value = model.frame.truncated
             tick.intValue++
             return@LaunchedEffect
         }
-        // Another window or foot (or resuming): fit the scales to it at once, then follow with hysteresis.
+        // Another window, foot or selection (or resuming): fit the scales to it at once, then follow with hysteresis.
         var fit = true
         while (true) {
             withFrameNanos {
                 val start = LivePerf.start()
-                model.update(controller, controller.nowNanos(), seconds, sensorFoot, fit)
+                model.update(controller, controller.nowNanos(), chart, fit)
                 LivePerf.work(start)
                 fit = false
                 truncated.value = model.frame.truncated
@@ -282,8 +309,8 @@ fun ChartView(
         ChartPanels(
             model = model,
             tick = tick,
-            sensorFoot = sensorFoot,
-            onSensorFoot = { onChartChange(chart.copy(sensorFoot = it)) },
+            chart = chart,
+            onChartChange = onChartChange,
             legend = { foot ->
                 val status = if (foot == Foot.LEFT) leftStatus else rightStatus
                 val name = if (foot == Foot.LEFT) "Left" else "Right"
@@ -310,14 +337,14 @@ fun PlaybackChartView(
     val model = remember(player) { ChartModel() }
     val tick = remember { mutableIntStateOf(0) }
     val seconds = chart.window.seconds
-    LaunchedEffect(player, seconds) {
+    LaunchedEffect(player, chart) {
         var shown = Double.NaN
         while (true) {
             withFrameNanos {
                 val position = player.position
                 if (position != shown) {
                     val start = LivePerf.start()
-                    model.update(player, position, seconds)
+                    model.update(player, position, chart)
                     LivePerf.work(start)
                     shown = position
                     tick.intValue++
@@ -348,8 +375,8 @@ fun PlaybackChartView(
         ChartPanels(
             model = model,
             tick = tick,
-            sensorFoot = chart.sensorFoot,
-            onSensorFoot = { onChartChange(chart.copy(sensorFoot = it)) },
+            chart = chart,
+            onChartChange = onChartChange,
             legend = { foot ->
                 val name = if (foot == Foot.LEFT) "Left" else "Right"
                 if (foot in feet) LegendEntry(name, muted = false) else LegendEntry("$name · Not recorded", true)
@@ -390,17 +417,23 @@ private fun ChartControls(
     }
 }
 
-/** The three panels; [plotModifier] goes on every plot canvas (the player's seek gestures). */
+/**
+ * The three panels; [plotModifier] goes on every plot canvas (the player's seek gestures). The sensors panel plots
+ * [ChartSettings.sensors] of [ChartSettings.sensorFoot]; the load panel each foot's total or the sum of those sensors.
+ */
 @Composable
 private fun ColumnScope.ChartPanels(
     model: ChartModel,
     tick: MutableIntState,
-    sensorFoot: Foot,
-    onSensorFoot: (Foot) -> Unit,
+    chart: ChartSettings,
+    onChartChange: (ChartSettings) -> Unit,
     legend: (Foot) -> LegendEntry,
     compact: Boolean,
     plotModifier: Modifier = Modifier,
 ) {
+    val sensorFoot = chart.sensorFoot
+    val selection = chart.sensors
+    val sumSelected = chart.load == ChartLoad.SELECTED
     val plotter = remember { Plotter() }
     val scheme = MaterialTheme.colorScheme
     val sock = LocalSockColors.current
@@ -427,12 +460,15 @@ private fun ColumnScope.ChartPanels(
 
     val panelGap = if (compact) 6.dp else 10.dp
     ChartPanel(
-        title = "Total load",
+        title = if (sumSelected) "Sum of ${selection.numbersText()}" else "Total load",
         unit = "µS",
         legend = {
             LegendItem(leftLegend.text, colors.left, leftLegend.muted)
             LegendItem(rightLegend.text, colors.right, rightLegend.muted)
         },
+        action = { LoadSelector(chart.load, onSelect = { onChartChange(chart.copy(load = it)) }) },
+        legendBelow = compact,
+        actionWithLegend = compact,
         modifier = Modifier.weight(1f),
     ) {
         Canvas(Modifier.fillMaxSize().then(plotModifier)) {
@@ -447,8 +483,11 @@ private fun ColumnScope.ChartPanels(
             clipRect(plot.left, plot.top - 2f, plot.right, plot.bottom + 2f) {
                 val l = model.frame.left
                 val r = model.frame.right
-                plotSeries(l, l.total, plot, span, 0f, scale, plotter, colors.left, strokes.total)
-                plotSeries(r, r.total, plot, span, 0f, scale, plotter, colors.right, strokes.total)
+                val summed = model.drawn.load == ChartLoad.SELECTED
+                val lv = if (summed) l.selected else l.total
+                val rv = if (summed) r.selected else r.total
+                plotSeries(l, lv, plot, span, 0f, scale, plotter, colors.left, strokes.total)
+                plotSeries(r, rv, plot, span, 0f, scale, plotter, colors.right, strokes.total)
             }
             drawPlayhead(model, plot, span, colors)
             LivePerf.work(t0)
@@ -459,10 +498,22 @@ private fun ColumnScope.ChartPanels(
         title = "Sensors",
         unit = "µS",
         legend = {
-            for (s in 0 until SENSOR_COUNT) LegendItem(names.short[s], colors.sensors[s])
+            AllChip(selection.isAll, onClick = { onChartChange(chart.copy(sensors = SensorSelection.All)) })
+            for (s in 0 until SENSOR_COUNT) {
+                SensorChip(
+                    number = names.numbers[s],
+                    // Phones: numbers only, so that the chips fit one line and leave the plot its height.
+                    name = if (compact) null else names.short[s],
+                    description = names.labels[s],
+                    color = colors.sensors[s],
+                    selected = s in selection,
+                    onToggle = { onChartChange(chart.copy(sensors = selection.toggle(s))) },
+                )
+            }
         },
-        action = { FootSelector(sensorFoot, onSelect = onSensorFoot) },
+        action = { FootSelector(sensorFoot, onSelect = { onChartChange(chart.copy(sensorFoot = it)) }) },
         legendBelow = compact,
+        legendSpacing = if (compact) 6.dp else 10.dp,
         modifier = Modifier.weight(1.25f),
     ) {
         Canvas(Modifier.fillMaxSize().then(plotModifier)) {
@@ -470,7 +521,8 @@ private fun ColumnScope.ChartPanels(
             val t0 = LivePerf.start()
             val plot = plotArea(withTimeLabels = false)
             val scale = model.sensors.max
-            val w = model.frame.foot(sensorFoot)
+            val w = model.frame.foot(model.drawn.sensorFoot)
+            val mask = model.drawn.sensors.mask
             val span = model.frame.spanSeconds
             drawContact(w, plot, span, colors.contact)
             drawTimeGrid(plot, span, model.endSeconds, colors)
@@ -478,6 +530,7 @@ private fun ColumnScope.ChartPanels(
             drawValueGrid(plot, scale, step, plotter.sensorGrid.of(scale, step), colors, labels)
             clipRect(plot.left, plot.top - 2f, plot.right, plot.bottom + 2f) {
                 for (s in 0 until SENSOR_COUNT) {
+                    if ((mask shr s) and 1 == 0) continue
                     plotSeries(w, w.loads[s], plot, span, 0f, scale, plotter, colors.sensors[s], strokes.sensor)
                 }
             }
@@ -549,6 +602,9 @@ private fun ChartPanel(
     action: (@Composable () -> Unit)? = null,
     /** The legend gets its own line (narrow screens, many entries). */
     legendBelow: Boolean = false,
+    /** With [legendBelow]: the action goes at the end of the legend's line, so the title has the whole first one. */
+    actionWithLegend: Boolean = false,
+    legendSpacing: Dp = 10.dp,
     plot: @Composable ColumnScope.() -> Unit,
 ) {
     Surface(
@@ -560,8 +616,8 @@ private fun ChartPanel(
             val legendRow = @Composable { m: Modifier ->
                 FlowRow(
                     m,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(legendSpacing),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) { legend() }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -570,17 +626,29 @@ private fun ChartPanel(
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    // Alone on its line it takes the rest (and shrinks, with an ellipsis, before the action would be
+                    // pushed out); beside the legend it keeps its width and the legend wraps.
+                    modifier = if (legendBelow) Modifier.weight(1f) else Modifier,
                 )
-                Spacer(Modifier.width(12.dp))
-                if (legendBelow) Spacer(Modifier.weight(1f)) else legendRow(Modifier.weight(1f))
-                if (action != null) {
+                if (!legendBelow) {
+                    Spacer(Modifier.width(12.dp))
+                    legendRow(Modifier.weight(1f))
+                }
+                if (action != null && !(legendBelow && actionWithLegend)) {
                     Spacer(Modifier.width(8.dp))
                     action()
                 }
             }
             if (legendBelow) {
                 Spacer(Modifier.height(4.dp))
-                legendRow(Modifier.fillMaxWidth())
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    legendRow(Modifier.weight(1f))
+                    if (action != null && actionWithLegend) {
+                        Spacer(Modifier.width(8.dp))
+                        action()
+                    }
+                }
             }
             Spacer(Modifier.height(4.dp))
             Column(Modifier.weight(1f).fillMaxWidth(), content = plot)
@@ -602,6 +670,110 @@ private fun LegendItem(text: String, color: Color, muted: Boolean = false) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
         )
+    }
+}
+
+/**
+ * A sensor's on/off toggle in the sensors panel, doubling as its legend entry: a swatch in the sensor's series colour,
+ * its channel number and short name (none: [description] only for accessibility). Turned off it fades; the last one
+ * on cannot be turned off (see [SensorSelection.toggle]).
+ */
+@Composable
+private fun SensorChip(
+    number: String,
+    name: String?,
+    description: String,
+    color: Color,
+    selected: Boolean,
+    onToggle: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(50)
+    Row(
+        Modifier
+            .height(26.dp)
+            .clip(shape)
+            .background(if (selected) color.copy(alpha = 0.16f) else Color.Transparent)
+            .border(1.dp, if (selected) color.copy(alpha = 0.7f) else scheme.outlineVariant, shape)
+            .toggleable(value = selected, role = Role.Checkbox, onValueChange = { onToggle() })
+            .semantics { contentDescription = description }
+            .padding(start = if (name == null) 6.dp else 7.dp, end = if (name == null) 7.dp else 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(if (name == null) 8.dp else 10.dp)
+                .then(
+                    if (selected) {
+                        Modifier.background(color, CircleShape)
+                    } else {
+                        Modifier.border(1.5.dp, color.copy(alpha = 0.6f), CircleShape)
+                    },
+                ),
+        )
+        Spacer(Modifier.width(if (name == null) 4.dp else 6.dp))
+        Text(
+            number,
+            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+            color = if (selected) scheme.onSurface else scheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+        if (name != null) {
+            Spacer(Modifier.width(4.dp))
+            Text(
+                name,
+                style = MaterialTheme.typography.labelMedium,
+                color = scheme.onSurfaceVariant.copy(alpha = if (selected) 1f else 0.7f),
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+/** Selects all sensors; shown selected while all are. */
+@Composable
+private fun AllChip(selected: Boolean, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(50)
+    Box(
+        Modifier
+            .height(26.dp)
+            .clip(shape)
+            .background(if (selected) scheme.primaryContainer else Color.Transparent)
+            .border(1.dp, if (selected) scheme.primaryContainer else scheme.outline, shape)
+            .selectable(selected = selected, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            "All",
+            style = MaterialTheme.typography.labelMedium,
+            color = if (selected) scheme.onPrimaryContainer else scheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+    }
+}
+
+/** What the load panel plots: each foot's total, or the sum of the selected sensors. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LoadSelector(selected: ChartLoad, onSelect: (ChartLoad) -> Unit) {
+    SingleChoiceSegmentedButtonRow(Modifier.height(30.dp)) {
+        ChartLoad.entries.forEachIndexed { i, mode ->
+            SegmentedButton(
+                selected = mode == selected,
+                onClick = { onSelect(mode) },
+                shape = SegmentedButtonDefaults.itemShape(i, ChartLoad.entries.size),
+                icon = {},
+                colors = segmentColors(),
+                contentPadding = PaddingValues(horizontal = 10.dp),
+            ) {
+                Text(
+                    if (mode == ChartLoad.TOTAL) "Total" else "Selected",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                )
+            }
+        }
     }
 }
 
@@ -792,14 +964,9 @@ private fun DrawScope.drawAxisLabel(text: String, y: Float, plot: Rect, labels: 
 }
 
 /** The insole's sensor rows (y, name), front first: reference lines of the COP panel. */
-private val CopRows: List<Pair<Float, String>> =
-    LiveGeometry.layout.positions(Foot.LEFT).map { it.y.toFloat() }.distinct().sortedDescending().map { y ->
-        y to when {
-            y > 0.45f -> "Fore"
-            y < -0.45f -> "Heel"
-            else -> "Mid"
-        }
-    }
+private val CopRows: List<Pair<Float, String>> = FootRegion.entries.map {
+    LiveGeometry.layout.rowY(it).toFloat() to SensorNames.regionShort(it)
+}
 
 /** The sensor rows of the insole as reference lines: forefoot, midfoot, heel. */
 private fun DrawScope.drawCopGrid(plot: Rect, colors: ChartColors, labels: LabelCache) {

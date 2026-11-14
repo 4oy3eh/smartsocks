@@ -1,6 +1,7 @@
 package com.smartsocks.core.sim
 
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.model.SensorLayout
 import com.smartsocks.core.protocol.MeasurementRange
 import com.smartsocks.core.protocol.PacketEncoder
 import com.smartsocks.core.protocol.PacketFormat
@@ -45,6 +46,8 @@ data class SimConfig(
     /** Simulate the link dropping after this many packets. */
     val disconnectAfterPackets: Long? = null,
     val seed: Int = 42,
+    /** Where the simulated forces land: pass the session's layout, so the processor reads them where they are. */
+    val layout: SensorLayout = SensorLayout.Legacy,
 )
 
 /** An insole whose sensors conduct ~10 µS (100 kΩ) unloaded, in range from 128 kΩ up: baseline subtraction matters. */
@@ -92,7 +95,7 @@ class SimulatedSockTransport(
     private val leaks = DoubleArray(SENSOR_COUNT) {
         config.leakMicroSiemens * (1 + config.leakSpread * (random.nextDouble() * 2 - 1))
     }
-    private val gait = GaitModel(foot, config.bodyWeightKg, config.cadenceStepsPerMin)
+    private val gait = GaitModel(foot, config.bodyWeightKg, config.cadenceStepsPerMin, config.layout)
     private val forces = DoubleArray(SENSOR_COUNT)
 
     @Volatile

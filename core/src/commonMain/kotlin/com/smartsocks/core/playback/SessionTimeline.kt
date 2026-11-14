@@ -6,6 +6,7 @@ import com.smartsocks.core.analytics.BaselineSource
 import com.smartsocks.core.analytics.FootLoad
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.Point
+import com.smartsocks.core.model.SensorLayout
 import com.smartsocks.core.recording.CsvFootJoin
 import com.smartsocks.core.recording.CsvMarker
 import com.smartsocks.core.recording.CsvRow
@@ -199,12 +200,13 @@ class SessionTimeline private constructor(
 
         /**
          * Streams a [CsvRecorder][com.smartsocks.core.recording.CsvRecorder] file straight into a timeline: no
-         * row objects are kept, so memory is the compact tracks only. Blocking: call it off the main thread.
+         * row objects are kept, so memory is the compact tracks only; the COP comes in [layout] (see
+         * [CsvSessionReader]). Blocking: call it off the main thread.
          * @throws IllegalArgumentException as [CsvSessionReader.stream].
          */
-        fun read(lines: Iterable<String>): SessionTimeline {
+        fun read(lines: Iterable<String>, layout: SensorLayout = SensorLayout.Legacy): SessionTimeline {
             val builder = SessionTimelineBuilder()
-            val info = CsvSessionReader.stream(lines, builder::add)
+            val info = CsvSessionReader.stream(lines, layout, builder::add)
             return builder.build(info)
         }
 

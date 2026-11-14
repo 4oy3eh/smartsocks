@@ -1,6 +1,7 @@
 package com.smartsocks.core.analytics
 
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.model.FootRegion
 import com.smartsocks.core.model.Point
 import com.smartsocks.core.model.SensorFrame
 import com.smartsocks.core.model.SensorLayout
@@ -79,8 +80,8 @@ class CenterOfPressureTest {
     @Test
     fun `COP stays between loaded sensors - legacy formula left the foot here`() {
         val loads = doubleArrayOf(100.0, 0.0, 100.0, 0.0, 0.0, 0.0)
-        // Legacy: x = 0.259 + 0.259 = 0.518, outside the insole.
-        assertPoint(Point(0.259, 0.483), CenterOfPressure.compute(loads, positions, 1.0)?.position)
+        // Legacy: x = 0.259 + 0.259 = 0.518, outside the insole. Channels 1 and 3 are on the same side.
+        assertPoint(Point(positions[0].x, 0.483), CenterOfPressure.compute(loads, positions, 1.0)?.position)
     }
 
     @Test
@@ -102,6 +103,60 @@ class CenterOfPressureTest {
         val left = SensorLayout.Legacy.positions(Foot.LEFT)
         val right = SensorLayout.Legacy.positions(Foot.RIGHT)
         for (i in 0 until 6) assertEquals(Point(-left[i].x, left[i].y), right[i])
+    }
+
+    @Test
+    fun `sides and rows come from the positions`() {
+        val layout = SensorLayout.Legacy
+        val medial = (0 until 6).filter { layout.isMedial(it) }
+        assertEquals(if (SensorLayout.ODD_CHANNELS_MEDIAL) listOf(0, 2, 4) else listOf(1, 3, 5), medial)
+        assertEquals(
+            listOf(FootRegion.FORE, FootRegion.FORE, FootRegion.MID, FootRegion.MID, FootRegion.HEEL, FootRegion.HEEL),
+            (0 until 6).map { layout.region(it) },
+        )
+        // Medial faces the other foot: +x on the left insole, -x on the right one.
+        for (i in medial) {
+            assertTrue(layout.positions(Foot.LEFT)[i].x > 0)
+            assertTrue(layout.positions(Foot.RIGHT)[i].x < 0)
+        }
+        // Any layout: the side follows the sign of x on the left insole, not the channel number.
+        val flipped = layout.mirrored()
+        assertEquals((0 until 6).map { !layout.isMedial(it) }, (0 until 6).map { flipped.isMedial(it) })
+        assertEquals(SensorLayout.legacy(!SensorLayout.ODD_CHANNELS_MEDIAL), flipped)
+        assertEquals(0.966, layout.rowY(FootRegion.FORE), 1e-12)
+        assertEquals(0.0, layout.rowY(FootRegion.MID), 1e-12)
+    }
+
+    @Test
+    fun `rows are found by position, whatever the units and channel order`() {
+        // Millimetres, rows not level, channels in another order: heel first.
+        val mm = SensorLayout(
+            listOf(
+                Point(-25.0, -110.0),
+                Point(22.0, -105.0),
+                Point(30.0, 8.0),
+                Point(-28.0, -6.0),
+                Point(-30.0, 118.0),
+                Point(35.0, 125.0),
+            ),
+        )
+        assertEquals(
+            listOf(FootRegion.HEEL, FootRegion.HEEL, FootRegion.MID, FootRegion.MID, FootRegion.FORE, FootRegion.FORE),
+            (0 until 6).map { mm.region(it) },
+        )
+        assertEquals(listOf(false, true, true, false, false, true), (0 until 6).map { mm.isMedial(it) })
+        assertEquals(121.5, mm.rowY(FootRegion.FORE), 1e-12)
+        assertEquals(-107.5, mm.rowY(FootRegion.HEEL), 1e-12)
+    }
+
+    @Test
+    fun `a row needs one medial and one lateral sensor`() {
+        val positions = SensorLayout.Legacy.positions(Foot.LEFT)
+        val sameSide = positions.toMutableList().apply { this[1] = Point(-this[1].x, this[1].y) }
+        assertFailsWith<IllegalArgumentException> { SensorLayout(sameSide) }
+        val onTheLine = positions.toMutableList().apply { this[0] = Point(0.0, this[0].y) }
+        assertFailsWith<IllegalArgumentException> { SensorLayout(onTheLine) }
+        assertFailsWith<IllegalArgumentException> { SensorLayout(positions.take(5)) }
     }
 }
 

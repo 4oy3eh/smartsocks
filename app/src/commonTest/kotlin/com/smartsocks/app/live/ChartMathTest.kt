@@ -1,5 +1,6 @@
 package com.smartsocks.app.live
 
+import com.smartsocks.core.model.SensorLayout
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -153,20 +154,29 @@ class ChartMathTest {
 
     @Test
     fun sensorNamesFollowTheLegacyLayout() {
+        // Odd channels are medial unless the hardware assumption is flipped.
+        val odd = if (SensorLayout.ODD_CHANNELS_MEDIAL) "medial" else "lateral"
+        val even = if (SensorLayout.ODD_CHANNELS_MEDIAL) "lateral" else "medial"
         assertEquals(
             listOf(
-                "Forefoot medial",
-                "Forefoot lateral",
-                "Midfoot medial",
-                "Midfoot lateral",
-                "Heel medial",
-                "Heel lateral",
+                "Forefoot $odd",
+                "Forefoot $even",
+                "Midfoot $odd",
+                "Midfoot $even",
+                "Heel $odd",
+                "Heel $even",
             ),
             SensorNames.Default.full,
         )
+        val o = odd.take(3)
+        val e = even.take(3)
         assertEquals(
-            listOf("Fore med", "Fore lat", "Mid med", "Mid lat", "Heel med", "Heel lat"),
+            listOf("Fore $o", "Fore $e", "Mid $o", "Mid $e", "Heel $o", "Heel $e"),
             SensorNames.Default.short,
         )
+        assertEquals("1 · Fore $odd", SensorNames.Default.labels[0])
+        assertEquals("6 · Heel $even", SensorNames.Default.labels[5])
+        assertEquals(List(6) { (it % 2 == 0) == SensorLayout.ODD_CHANNELS_MEDIAL }, SensorNames.Default.medial)
+        assertEquals(listOf("1", "2", "3", "4", "5", "6"), SensorNames.Default.numbers)
     }
 }

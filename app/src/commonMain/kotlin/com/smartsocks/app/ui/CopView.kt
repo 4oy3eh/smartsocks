@@ -27,15 +27,15 @@ import com.smartsocks.app.live.FootView
 import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveGeometry
 import com.smartsocks.app.live.LiveSnapshot
+import com.smartsocks.app.live.loadLevel
 import com.smartsocks.core.model.Foot
 import kotlin.math.min
-import kotlin.math.sqrt
 
 /**
  * Insole outline of the LEFT foot in layout units (+x medial, i.e. towards the other foot; +y towards the toes),
  * wide enough to contain the legacy 2x3 sensor grid. The right insole is its mirror image.
  */
-private object Insole {
+internal object Insole {
     const val MIN_X = -0.5f
     const val MAX_X = 0.5f
     const val MIN_Y = -1.36f
@@ -149,11 +149,7 @@ private fun DrawScope.drawFoot(
     for (i in positions.indices) {
         val p = positions[i]
         val center = m.at(cx + p.x, p.y)
-        val t = if (state != null) {
-            sqrt((state.loads[i] / fullScale).coerceIn(0.0, 1.0)).toFloat()
-        } else {
-            0f
-        }
+        val t = if (state != null) loadLevel(state.loads[i], fullScale) else 0f
         val radius = m.units(0.075f + 0.055f * t)
         if (state == null) {
             drawCircle(colors.sensorEmpty.copy(alpha = 0.8f), m.units(0.075f), center, style = Stroke(1.5f))

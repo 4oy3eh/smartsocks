@@ -3,6 +3,7 @@ package com.smartsocks.app.recording
 import com.smartsocks.app.live.FootStatus
 import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveController
+import com.smartsocks.app.live.LiveGeometry
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.protocol.MeasurementRange
@@ -312,7 +313,7 @@ class RecordingController(
                 // The header names the feet of [start] only: any other foot (even one that began to stream while the
                 // files were created) is announced by a join line with its first sample, so the file never names a
                 // foot it may then have no data of.
-                Writer(files, RecordingMetadata(files.startTimeIso, rate, range, feet))
+                Writer(files, RecordingMetadata(files.startTimeIso, rate, range, feet, layout = LiveGeometry.layout))
             } catch (e: CancellationException) {
                 created?.let { discard(it) }
                 throw e

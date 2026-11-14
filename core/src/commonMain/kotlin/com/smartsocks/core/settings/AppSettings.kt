@@ -2,6 +2,7 @@ package com.smartsocks.core.settings
 
 import com.smartsocks.core.analytics.ProcessorSettings
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.protocol.SENSOR_COUNT
 import com.smartsocks.core.session.StreamSettings
 import com.smartsocks.core.sim.SimMode
 
@@ -31,8 +32,66 @@ enum class ChartWindow(val seconds: Int) {
     SECONDS_30(30),
 }
 
-/** The live chart's choices: its time window and the foot whose six sensors it plots. */
-data class ChartSettings(val window: ChartWindow = ChartWindow.SECONDS_10, val sensorFoot: Foot = Foot.LEFT)
+/**
+ * A non-empty set of sensor channels, as a bit mask: bit `i` is channel `i + 1` (index `i` of the load arrays).
+ * Never empty: [toggle] keeps the last selected channel.
+ */
+data class SensorSelection(val mask: Int) {
+    init {
+        require(mask in 1..ALL_MASK) { "Not a sensor selection: $mask" }
+    }
+
+    /** Channel index (0-based) [index] is selected. */
+    operator fun contains(index: Int): Boolean = index in 0 until SENSOR_COUNT && (mask shr index) and 1 == 1
+
+    val isAll: Boolean get() = mask == ALL_MASK
+
+    /** Selected channel indices (0-based), ascending. */
+    val indices: List<Int> get() = (0 until SENSOR_COUNT).filter { it in this }
+
+    /** Channel [index] (0-based) flipped; the only selected channel stays selected. */
+    fun toggle(index: Int): SensorSelection {
+        require(index in 0 until SENSOR_COUNT)
+        val m = mask xor (1 shl index)
+        return if (m == 0) this else SensorSelection(m)
+    }
+
+    /** Channel numbers, "1+3+5"; "1–6" for all. */
+    fun numbersText(): String = if (isAll) "1–$SENSOR_COUNT" else indices.joinToString("+") { "${it + 1}" }
+
+    companion object {
+        const val ALL_MASK = (1 shl SENSOR_COUNT) - 1
+
+        val All = SensorSelection(ALL_MASK)
+
+        /** From channel indices (0-based); out-of-range ones are ignored, none at all means [All]. */
+        fun of(indices: Iterable<Int>): SensorSelection {
+            var m = 0
+            for (i in indices) if (i in 0 until SENSOR_COUNT) m = m or (1 shl i)
+            return if (m == 0) All else SensorSelection(m)
+        }
+    }
+}
+
+/** What the chart's load panel plots per foot. */
+enum class ChartLoad {
+    /** The foot's total load. */
+    TOTAL,
+
+    /** The sum of the selected sensors' loads ([ChartSettings.sensors]). */
+    SELECTED,
+}
+
+/**
+ * The live chart's choices: its time window, the foot whose sensors it plots, which of them ([sensors], also summed
+ * by the load panel in [ChartLoad.SELECTED] mode) and what the load panel shows.
+ */
+data class ChartSettings(
+    val window: ChartWindow = ChartWindow.SECONDS_10,
+    val sensorFoot: Foot = Foot.LEFT,
+    val sensors: SensorSelection = SensorSelection.All,
+    val load: ChartLoad = ChartLoad.TOTAL,
+)
 
 /** How sessions are recorded. [saveRaw]: also keep every undecoded packet in a second file, to re-process later. */
 data class RecordingSettings(val saveRaw: Boolean = true)

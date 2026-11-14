@@ -3,6 +3,7 @@ package com.smartsocks.core.settings
 import com.smartsocks.core.analytics.ProcessorSettings
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.protocol.MeasurementRange
+import com.smartsocks.core.protocol.SENSOR_COUNT
 import com.smartsocks.core.protocol.SampleRate
 import com.smartsocks.core.session.StreamSettings
 import com.smartsocks.core.sim.SimMode
@@ -63,6 +64,8 @@ object SettingsCodec {
         put("liveView", settings.liveView.name)
         put("chart.window", settings.chart.window.name)
         put("chart.sensorFoot", settings.chart.sensorFoot.name)
+        put("chart.sensors", settings.chart.sensors.indices.joinToString(",") { "${it + 1}" })
+        put("chart.load", settings.chart.load.name)
         put("recording.saveRaw", settings.recording.saveRaw)
         put("autoConnect", settings.autoConnect)
         put("autoReconnect", settings.autoReconnect)
@@ -99,6 +102,8 @@ object SettingsCodec {
             chart = ChartSettings(
                 window = enum("chart.window", defaults.chart.window) { ChartWindow.valueOf(it) },
                 sensorFoot = enum("chart.sensorFoot", defaults.chart.sensorFoot) { Foot.valueOf(it) },
+                sensors = sensors("chart.sensors", defaults.chart.sensors),
+                load = enum("chart.load", defaults.chart.load) { ChartLoad.valueOf(it) },
             ),
             recording = RecordingSettings(saveRaw = boolean("recording.saveRaw", defaults.recording.saveRaw)),
             autoConnect = boolean("autoConnect", defaults.autoConnect),
@@ -152,6 +157,13 @@ object SettingsCodec {
                     copBeta = number("processor.copBeta", d.copBeta) { it >= 0.0 },
                 )
             }.getOrDefault(d)
+        }
+
+        /** Channel numbers 1..6, comma separated; others are skipped, and with none left: [default]. */
+        private fun sensors(key: String, default: SensorSelection): SensorSelection {
+            val text = values[key] ?: return default
+            val indices = text.split(',').mapNotNull { it.trim().toIntOrNull()?.minus(1) }
+            return if (indices.none { it in 0 until SENSOR_COUNT }) default else SensorSelection.of(indices)
         }
 
         private inline fun number(key: String, default: Double, valid: (Double) -> Boolean = { true }): Double =

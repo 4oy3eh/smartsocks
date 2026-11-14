@@ -5,6 +5,7 @@ import com.smartsocks.core.model.Foot
 import com.smartsocks.core.playback.FootTrack
 import com.smartsocks.core.playback.SessionTimeline
 import com.smartsocks.core.protocol.SENSOR_COUNT
+import com.smartsocks.core.settings.SensorSelection
 import kotlin.concurrent.Volatile
 import kotlin.math.max
 import kotlin.math.min
@@ -142,8 +143,9 @@ class LiveHistory(capacity: Int = FootHistory.DEFAULT_CAPACITY) {
 
 /**
  * A copy of the samples of one [FootHistory] inside a time window, in reusable arrays sized once: what a chart draws
- * in one frame. Times are seconds relative to the window's "now" (so ≤ 0 for the past). Not thread-safe: owned by the
- * UI thread.
+ * in one frame. Times are seconds relative to the window's "now" (so ≤ 0 for the past). Besides the copied values it
+ * holds [selected], the sum of the loads of the sensors in [selection], added up while copying (no extra history is
+ * kept). Not thread-safe: owned by the UI thread.
  */
 class HistoryWindow(val capacity: Int) {
     /** Written right before the re-check in [copy], to order it after the copy's reads. */
@@ -157,10 +159,17 @@ class HistoryWindow(val capacity: Int) {
     val t = FloatArray(capacity)
     val total = FloatArray(capacity)
     val loads = Array(SENSOR_COUNT) { FloatArray(capacity) }
+
+    /** Sum of the loads of the sensors in [selection]; a non-finite load (none recorded) counts as 0. */
+    val selected = FloatArray(capacity)
     val copX = FloatArray(capacity)
     val copY = FloatArray(capacity)
     val contact = BooleanArray(capacity)
     val breaks = BooleanArray(capacity)
+
+    /** The sensors summed into [selected] by the last copy: a [SensorSelection.mask]. */
+    var selection: Int = SensorSelection.ALL_MASK
+        private set
 
     /** Valid entries: indices `0 until size`. */
     var size: Int = 0
@@ -181,9 +190,10 @@ class HistoryWindow(val capacity: Int) {
     /**
      * Copies the samples of [history] stamped in (`nowNanos - spanNanos`, `nowNanos`], plus the one just before the
      * window when there is one (so a line enters from the left edge). Never more than the history's readable half
-     * or this window's capacity: the newest samples win.
+     * or this window's capacity: the newest samples win. [selection]: the sensors summed into [selected].
      */
-    fun copy(history: FootHistory, nowNanos: Long, spanNanos: Long) {
+    fun copy(history: FootHistory, nowNanos: Long, spanNanos: Long, selection: Int = SensorSelection.ALL_MASK) {
+        this.selection = selection
         val w = history.written // acquire: slots below w are complete
         val firstValid = history.firstValid
         val lowest = max(firstValid, w - min(history.readableSamples, capacity))
@@ -213,7 +223,13 @@ class HistoryWindow(val capacity: Int) {
             val i = (k % cap).toInt()
             t[n] = ((times[i] - nowNanos) / 1e9).toFloat()
             total[n] = history.totals[i]
-            for (s in 0 until SENSOR_COUNT) loads[s][n] = history.loads[s][i]
+            var sum = 0f
+            for (s in 0 until SENSOR_COUNT) {
+                val v = history.loads[s][i]
+                loads[s][n] = v
+                if ((selection shr s) and 1 == 1 && v.isFinite()) sum += v
+            }
+            selected[n] = sum
             copX[n] = history.copX[i]
             copY[n] = history.copY[i]
             contact[n] = history.contact[i]
@@ -245,10 +261,17 @@ class HistoryWindow(val capacity: Int) {
      * Copies the recorded samples of [track] in (`endMillis - spanMillis`, `endMillis`], plus the one just before,
      * with times in seconds relative to [endMillis] (so the chart draws them exactly like live data). A gap longer
      * than [maxGapMillis] (the link was down) breaks the line. With more samples than [capacity] every k-th is
-     * taken. Nothing is allocated.
+     * taken. [selection]: the sensors summed into [selected]. Nothing is allocated.
      */
-    fun copy(track: FootTrack, endMillis: Double, spanMillis: Double, maxGapMillis: Double) {
+    fun copy(
+        track: FootTrack,
+        endMillis: Double,
+        spanMillis: Double,
+        maxGapMillis: Double,
+        selection: Int = SensorSelection.ALL_MASK,
+    ) {
         clear()
+        this.selection = selection
         if (track.isEmpty()) return
         val from = endMillis - spanMillis
         val inside = track.range(from, endMillis)
@@ -263,7 +286,13 @@ class HistoryWindow(val capacity: Int) {
             val time = track.timeAt(k)
             t[n] = ((time - endMillis) / 1000).toFloat()
             total[n] = track.totalLoadAt(k).toFloat()
-            for (s in 0 until SENSOR_COUNT) loads[s][n] = track.loadAt(k, s).toFloat()
+            var sum = 0f
+            for (s in 0 until SENSOR_COUNT) {
+                val v = track.loadAt(k, s).toFloat()
+                loads[s][n] = v
+                if ((selection shr s) and 1 == 1 && v.isFinite()) sum += v
+            }
+            selected[n] = sum
             copX[n] = track.copXAt(k).toFloat()
             copY[n] = track.copYAt(k).toFloat()
             contact[n] = track.inContactAt(k)
@@ -285,10 +314,13 @@ class HistoryWindow(val capacity: Int) {
     /** Largest total load inside the window (not the sample before it); NaN when none. */
     fun maxTotal(): Float = maxOf(total)
 
-    /** Largest single-sensor load inside the window; NaN when none. */
-    fun maxLoad(): Float {
+    /** Largest sum of the selected sensors' loads inside the window; NaN when none. */
+    fun maxSelected(): Float = maxOf(selected)
+
+    /** Largest single-sensor load inside the window among the sensors in [mask] (all by default); NaN when none. */
+    fun maxLoad(mask: Int = SensorSelection.ALL_MASK): Float {
         var m = Float.NaN
-        for (s in loads) m = maxOrNaN(m, maxOf(s))
+        for (s in 0 until SENSOR_COUNT) if ((mask shr s) and 1 == 1) m = maxOrNaN(m, maxOf(loads[s]))
         return m
     }
 
@@ -303,6 +335,7 @@ class HistoryWindow(val capacity: Int) {
         t.copyInto(t, 0, drop, n)
         total.copyInto(total, 0, drop, n)
         for (s in loads) s.copyInto(s, 0, drop, n)
+        selected.copyInto(selected, 0, drop, n)
         copX.copyInto(copX, 0, drop, n)
         copY.copyInto(copY, 0, drop, n)
         contact.copyInto(contact, 0, drop, n)
@@ -336,21 +369,32 @@ class ChartFrame(capacity: Int = FootHistory.DEFAULT_CAPACITY / 2) {
     /** Largest total load of either foot; NaN when neither has data (a foot without data never hides the other). */
     fun maxTotal(): Float = maxOrNaN(left.maxTotal(), right.maxTotal())
 
-    /** A window of [timeline] ending at session time [endMillis]: what the player's chart draws. */
-    fun update(timeline: SessionTimeline, endMillis: Double, spanSeconds: Int) {
+    /** Largest sum of the selected sensors of either foot; NaN when neither has data. */
+    fun maxSelected(): Float = maxOrNaN(left.maxSelected(), right.maxSelected())
+
+    /**
+     * A window of [timeline] ending at session time [endMillis]: what the player's chart draws. [selection]: the
+     * sensors summed into [HistoryWindow.selected] (a [SensorSelection.mask]).
+     */
+    fun update(
+        timeline: SessionTimeline,
+        endMillis: Double,
+        spanSeconds: Int,
+        selection: Int = SensorSelection.ALL_MASK,
+    ) {
         this.nowNanos = 0
         this.spanSeconds = spanSeconds.toFloat()
         val span = spanSeconds * 1000.0
-        left.copy(timeline.track(Foot.LEFT), endMillis, span, timeline.staleAfterMillis(Foot.LEFT))
-        right.copy(timeline.track(Foot.RIGHT), endMillis, span, timeline.staleAfterMillis(Foot.RIGHT))
+        left.copy(timeline.track(Foot.LEFT), endMillis, span, timeline.staleAfterMillis(Foot.LEFT), selection)
+        right.copy(timeline.track(Foot.RIGHT), endMillis, span, timeline.staleAfterMillis(Foot.RIGHT), selection)
     }
 
-    fun update(history: LiveHistory, nowNanos: Long, spanSeconds: Int) {
+    fun update(history: LiveHistory, nowNanos: Long, spanSeconds: Int, selection: Int = SensorSelection.ALL_MASK) {
         this.nowNanos = nowNanos
         this.spanSeconds = spanSeconds.toFloat()
         val span = spanSeconds * 1_000_000_000L
-        left.copy(history.left, nowNanos, span)
-        right.copy(history.right, nowNanos, span)
+        left.copy(history.left, nowNanos, span, selection)
+        right.copy(history.right, nowNanos, span, selection)
     }
 }
 

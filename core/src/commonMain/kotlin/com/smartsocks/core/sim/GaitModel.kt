@@ -1,6 +1,8 @@
 package com.smartsocks.core.sim
 
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.model.FootRegion
+import com.smartsocks.core.model.SensorLayout
 import com.smartsocks.core.protocol.SENSOR_COUNT
 import kotlin.math.PI
 import kotlin.math.exp
@@ -20,15 +22,20 @@ enum class SimMode {
 /**
  * Plausible (not biomechanically exact) per-sensor forces in Newtons for one foot.
  *
- * Channels 1, 3, 5 (index 0, 2, 4) are assumed medial (big-toe side), 2, 4, 6 lateral; rows are forefoot, midfoot,
- * heel — matching [com.smartsocks.core.model.SensorLayout.Legacy].
+ * Which channel is medial (big-toe side) or lateral and which row it is in comes from [layout] (by default
+ * [SensorLayout.Legacy]), so the simulated forces land where the views draw those channels.
  */
 class GaitModel(
     private val foot: Foot,
     private val bodyWeightKg: Double = 70.0,
     private val cadenceStepsPerMin: Double = 100.0,
+    private val layout: SensorLayout = SensorLayout.Legacy,
 ) {
     private val weightN get() = bodyWeightKg * 9.81
+
+    // Looked up once: [forces] runs for every sample and allocates nothing.
+    private val regions = Array(SENSOR_COUNT) { layout.region(it) }
+    private val medialSide = BooleanArray(SENSOR_COUNT) { layout.isMedial(it) }
 
     fun forces(tSeconds: Double, mode: SimMode, out: DoubleArray = DoubleArray(SENSOR_COUNT)): DoubleArray {
         when (mode) {
@@ -82,12 +89,27 @@ class GaitModel(
         mid: Double,
         midMedial: Double,
     ) {
-        out[0] = fore * foreMedial
-        out[1] = fore * (1 - foreMedial)
-        out[2] = mid * midMedial
-        out[3] = mid * (1 - midMedial)
-        out[4] = heel * heelMedial
-        out[5] = heel * (1 - heelMedial)
+        for (i in 0 until SENSOR_COUNT) {
+            val load: Double
+            val medial: Double
+            when (regions[i]) {
+                FootRegion.FORE -> {
+                    load = fore
+                    medial = foreMedial
+                }
+
+                FootRegion.MID -> {
+                    load = mid
+                    medial = midMedial
+                }
+
+                FootRegion.HEEL -> {
+                    load = heel
+                    medial = heelMedial
+                }
+            }
+            out[i] = load * if (medialSide[i]) medial else 1 - medial
+        }
     }
 
     private fun bump(x: Double, center: Double, width: Double): Double {

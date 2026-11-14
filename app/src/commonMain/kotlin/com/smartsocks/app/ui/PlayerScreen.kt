@@ -204,7 +204,8 @@ private val ShortHeight = 520.dp
 
 private fun playbackNumbers(player: PlayerController, s: LiveSnapshot, foot: Foot): FootNumbers {
     val view = s.foot(foot)
-    val n = FootNumbers.of(view, null, s.balance?.let { if (foot == Foot.LEFT) it.left else it.right })
+    val share = s.balance?.let { if (foot == Foot.LEFT) it.left else it.right }
+    val n = FootNumbers.of(view, null, share, s.fullScaleLoad)
     val rate = player.session.header.rateHz
     return n.copy(rate = rate?.let { "Recorded at $it Hz" } ?: FootNumbers.NONE, dropped = FootNumbers.NONE)
 }

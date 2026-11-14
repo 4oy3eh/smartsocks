@@ -1,6 +1,8 @@
 package com.smartsocks.core.sim
 
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.model.FootRegion
+import com.smartsocks.core.model.SensorLayout
 import com.smartsocks.core.protocol.MeasurementRange
 import com.smartsocks.core.protocol.PacketDecoder
 import com.smartsocks.core.protocol.PacketFormat
@@ -41,6 +43,39 @@ class GaitModelTest {
         }
         assertTrue(heelPeakT < forePeakT, "heel peak $heelPeakT should precede forefoot peak $forePeakT")
         assertTrue(model.forces(stride * 0.8, SimMode.Walking).all { it == 0.0 }, "swing phase is unloaded")
+    }
+
+    @Test
+    fun `at push-off the medial forefoot carries more than the lateral one`() {
+        val layout = SensorLayout.Legacy
+        val fore = (0 until 6).filter { layout.region(it) == FootRegion.FORE }
+        val medial = fore.single { layout.isMedial(it) }
+        val lateral = fore.single { !layout.isMedial(it) }
+        for (foot in Foot.entries) {
+            val model = GaitModel(foot, cadenceStepsPerMin = 100.0)
+            // Late stance (85 % of it): the right foot is half a 1.2 s stride later.
+            val t = 0.85 * 0.62 * 1.2 + if (foot == Foot.RIGHT) 0.6 else 0.0
+            val f = model.forces(t, SimMode.Walking)
+            assertTrue(f[medial] > 1.5 * f[lateral], "$foot: medial ${f[medial]} vs lateral ${f[lateral]}")
+        }
+    }
+
+    @Test
+    fun `a mirrored layout swaps the channels of each row and keeps the force`() {
+        val legacy = GaitModel(Foot.LEFT)
+        val mirrored = GaitModel(Foot.LEFT, layout = SensorLayout.Legacy.mirrored())
+        for (i in 0 until 240) {
+            val t = i * 0.01
+            for (mode in SimMode.entries) {
+                val a = legacy.forces(t, mode)
+                val b = mirrored.forces(t, mode)
+                for (pair in listOf(0 to 1, 2 to 3, 4 to 5)) {
+                    assertEquals(a[pair.first], b[pair.second], 1e-9)
+                    assertEquals(a[pair.second], b[pair.first], 1e-9)
+                }
+                assertEquals(a.sum(), b.sum(), 1e-9)
+            }
+        }
     }
 
     @Test

@@ -6,6 +6,7 @@ import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.SensorLayout
 import kotlin.math.max
 import kotlin.math.pow
+import kotlin.math.sqrt
 
 /** Shared drawing geometry, in insole units (the [SensorLayout] coordinate system). */
 object LiveGeometry {
@@ -16,6 +17,15 @@ object LiveGeometry {
     const val STANCE_HALF_WIDTH = 0.8
 
     val layout: SensorLayout = SensorLayout.Legacy
+}
+
+/**
+ * How strongly a sensor with [load] (µS) is coloured, 0..1: the square root of its share of [fullScale], so light
+ * loads still show. 0 for no, a negative or an invalid load, or without a scale.
+ */
+fun loadLevel(load: Double, fullScale: Double): Float {
+    if (!(fullScale > 0.0) || !fullScale.isFinite() || !(load > 0.0)) return 0f
+    return sqrt((load / fullScale).coerceIn(0.0, 1.0)).toFloat()
 }
 
 /**

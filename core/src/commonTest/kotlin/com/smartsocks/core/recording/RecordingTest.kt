@@ -1,9 +1,11 @@
 package com.smartsocks.core.recording
 
 import com.smartsocks.core.analytics.BaselineSource
+import com.smartsocks.core.analytics.CenterOfPressure
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.Point
+import com.smartsocks.core.model.SensorLayout
 import com.smartsocks.core.protocol.MeasurementRange
 import com.smartsocks.core.protocol.PacketEncoder
 import com.smartsocks.core.protocol.RawPacket
@@ -63,6 +65,9 @@ class RecordingTest {
                 "# range=K64",
                 "# feet=LEFT+RIGHT",
                 "# note=test run",
+                "# sensor_layout=" + SensorLayout.Legacy.positions(Foot.LEFT).joinToString(";") {
+                    "${formatNumber(it.x, 4)}:${formatNumber(it.y, 4)}"
+                },
                 "t_ms,foot,r1,r2,r3,r4,r5,r6,load1,load2,load3,load4,load5,load6," +
                     "total_load,cop_x,cop_y,raw_cop_x,raw_cop_y,contact,baseline",
             ),
@@ -78,9 +83,9 @@ class RecordingTest {
         recorder.record(state(foot = Foot.RIGHT, nanos = 5_012_345_678))
         assertEquals(
             "0.000,LEFT,1000.0,2000.0,3000.0,4000.0,5000.0,6000.0,1.500,3.000,4.500,6.000,7.500,9.000,31.500,0.2500,-0.5000,0.2600,-0.5000,1,calibrated",
-            sink.lines[7],
+            sink.lines[8],
         )
-        assertTrue(sink.lines[8].startsWith("12.346,RIGHT,"))
+        assertTrue(sink.lines[9].startsWith("12.346,RIGHT,"))
     }
 
     @Test
@@ -111,8 +116,102 @@ class RecordingTest {
         recorder.record(state(nanos = 1_000_000_000))
         recorder.record(state(nanos = 1_250_000_000))
         recorder.marker("break one")
-        assertEquals("# marker t_ms=0.000 label=before", sink.lines[7])
+        assertEquals("# marker t_ms=0.000 label=before", sink.lines[8])
         assertEquals("# marker t_ms=250.000 label=break one", sink.lines.last())
+    }
+
+    /** A file of one LEFT sample in contact (sensor 1 loaded most) recorded with [layout], or without the header. */
+    private fun layoutFile(layout: SensorLayout?): List<String> {
+        val sink = InMemoryRecordingSink()
+        val recorder = CsvRecorder(sink, metadata.copy(layout = layout ?: SensorLayout.legacy(oddMedial = true)))
+        val loads = doubleArrayOf(30.0, 10.0, 5.0, 5.0, 0.0, 0.0)
+        val positions = (layout ?: SensorLayout.legacy(oddMedial = true)).positions(Foot.LEFT)
+        val cop = CenterOfPressure.compute(loads, positions, 0.0)!!.position
+        recorder.record(
+            FootState(
+                Foot.LEFT, 0, DoubleArray(6) { 1e4 }, loads, loads.sum(), DoubleArray(6),
+                Point(cop.x * 0.9, cop.y * 0.9), // smoothed: lags behind the raw COP
+                cop,
+                BaselineSource.AUTO,
+            ),
+        )
+        recorder.record(state(nanos = 10_000_000, cop = null)) // in the air: no COP
+        return if (layout == null) sink.lines.filterNot { it.startsWith("# sensor_layout=") } else sink.lines
+    }
+
+    @Test
+    fun `the layout header round trips and old readers keep it as an unknown entry`() {
+        val mirrored = SensorLayout.legacy(oddMedial = false)
+        val lines = layoutFile(mirrored)
+        val text = lines.first { it.startsWith("# sensor_layout=") }.substringAfter('=')
+        assertEquals(mirrored, decodeLayout(text))
+        assertNull(decodeLayout("1:2;3"), "malformed")
+        assertNull(decodeLayout(text.replace("-0.2590", "0.2590")), "a row without a lateral sensor")
+        val session = CsvSessionReader.read(lines, mirrored)
+        assertEquals(text, session.header["sensor_layout"])
+    }
+
+    @Test
+    fun `a file read with its own layout keeps its COP`() {
+        for (layout in listOf(SensorLayout.legacy(oddMedial = true), SensorLayout.legacy(oddMedial = false))) {
+            val lines = layoutFile(layout)
+            val info = CsvSessionReader.stream(lines, layout) {}
+            assertEquals(CopConversion.NONE, info.copConversion)
+            assertEquals(layout, info.recordedLayout)
+            val row = CsvSessionReader.read(lines, layout).rows[0]
+            val raw = CenterOfPressure.compute(row.loads, layout.positions(Foot.LEFT), 0.0)!!.position
+            assertEquals(raw.x * 0.9, row.cop!!.x, 1e-4, "the recorded smoothed COP, untouched")
+            assertEquals(raw.x, row.rawCop!!.x, 1e-4)
+        }
+    }
+
+    @Test
+    fun `a file without the header is the old layout and is mirrored for the flipped one`() {
+        val old = layoutFile(null)
+        val asRecorded = CsvSessionReader.read(old, SensorLayout.legacy(oddMedial = true))
+        val info = CsvSessionReader.stream(old, SensorLayout.legacy(oddMedial = false)) {}
+        assertEquals(SensorLayout.legacy(oddMedial = true), info.recordedLayout, "missing header: odd channels medial")
+        assertEquals(CopConversion.MIRRORED, info.copConversion)
+        val flipped = CsvSessionReader.read(old, SensorLayout.legacy(oddMedial = false))
+        val before = asRecorded.rows[0]
+        val after = flipped.rows[0]
+        assertEquals(-before.cop!!.x, after.cop!!.x, 1e-12)
+        assertEquals(before.cop!!.y, after.cop!!.y, 1e-12)
+        // The raw COP is what the current layout gives for the loads.
+        val expected = CenterOfPressure.compute(after.loads, SensorLayout.legacy(false).positions(Foot.LEFT), 0.0)!!
+        assertEquals(expected.position.x, after.rawCop!!.x, 1e-3)
+        assertEquals(expected.position.y, after.rawCop!!.y, 1e-3)
+        assertNull(flipped.rows[1].cop, "in the air stays in the air")
+        assertNull(flipped.rows[1].rawCop)
+    }
+
+    @Test
+    fun `another layout gets its COP recomputed from the loads`() {
+        val measured = SensorLayout(
+            listOf(
+                Point(0.3, 1.0),
+                Point(-0.2, 0.9),
+                Point(0.25, 0.1),
+                Point(-0.3, -0.1),
+                Point(0.2, -1.0),
+                Point(-0.2, -0.95),
+            ),
+        )
+        val old = layoutFile(null)
+        val info = CsvSessionReader.stream(old, measured) {}
+        assertEquals(CopConversion.RECOMPUTED, info.copConversion)
+        val row = CsvSessionReader.read(old, measured).rows[0]
+        val expected = CenterOfPressure.compute(row.loads, measured.positions(Foot.LEFT), 0.0)!!.position
+        assertEquals(expected.x, row.rawCop!!.x, 1e-9)
+        assertEquals(expected.y, row.rawCop!!.y, 1e-9)
+        assertEquals(row.rawCop, row.cop, "the smoothed COP cannot be redone: the raw one")
+        // A malformed header line counts as missing.
+        val broken = old.toMutableList().apply { add(1, "# sensor_layout=garbage") }
+        assertEquals(
+            CopConversion.NONE,
+            CsvSessionReader.stream(broken, SensorLayout.legacy(oddMedial = true)) {
+            }.copConversion,
+        )
     }
 
     @Test

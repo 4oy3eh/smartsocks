@@ -27,7 +27,12 @@ class SettingsCodecTest {
         ),
         theme = AppTheme.DARK,
         liveView = LiveView.NUMBERS,
-        chart = ChartSettings(ChartWindow.SECONDS_30, Foot.RIGHT),
+        chart = ChartSettings(
+            ChartWindow.SECONDS_30,
+            Foot.RIGHT,
+            SensorSelection.of(listOf(0, 3, 5)),
+            ChartLoad.SELECTED,
+        ),
         recording = RecordingSettings(saveRaw = false),
         autoConnect = false,
         autoReconnect = false,
@@ -207,6 +212,51 @@ class SettingsCodecTest {
             SettingsCodec.decode(withVersion("chart.window=SECONDS_5", "chart.sensorFoot=middle")).chart,
         )
         assertEquals(ChartSettings(), SettingsCodec.decode(withVersion("theme=DARK")).chart)
+    }
+
+    @Test
+    fun `sensor selection and load mode round trip`() {
+        for (mask in 1..SensorSelection.ALL_MASK) {
+            for (load in ChartLoad.entries) {
+                val s = AppSettings(chart = ChartSettings(sensors = SensorSelection(mask), load = load))
+                assertEquals(s, roundTrip(s))
+            }
+        }
+        val evens = AppSettings(chart = ChartSettings(sensors = SensorSelection.of(listOf(1, 3, 5))))
+        assertTrue("chart.sensors=2,4,6\n" in SettingsCodec.encode(evens))
+        assertTrue("chart.load=SELECTED\n" in SettingsCodec.encode(custom))
+    }
+
+    @Test
+    fun `files from before the sensor selection show all sensors and the total`() {
+        val old = SettingsCodec.decode(withVersion("chart.window=SECONDS_5", "chart.sensorFoot=RIGHT")).chart
+        assertEquals(ChartSettings(ChartWindow.SECONDS_5, Foot.RIGHT, SensorSelection.All, ChartLoad.TOTAL), old)
+    }
+
+    @Test
+    fun `a bad sensor selection is read forgivingly`() {
+        fun sensors(text: String) = SettingsCodec.decode(withVersion("chart.sensors=$text")).chart.sensors
+        assertEquals(SensorSelection.of(listOf(0, 2)), sensors(" 1, x ,3,9,0,-1"), "junk entries are skipped")
+        assertEquals(SensorSelection.of(listOf(4)), sensors("5,5"))
+        assertEquals(SensorSelection.All, sensors(""), "nothing selected: all")
+        assertEquals(SensorSelection.All, sensors("7,8"))
+        assertEquals(SensorSelection.All, sensors("none"))
+        assertEquals(ChartLoad.TOTAL, SettingsCodec.decode(withVersion("chart.load=SUM")).chart.load)
+        assertEquals(ChartLoad.SELECTED, SettingsCodec.decode(withVersion("chart.load= SELECTED")).chart.load)
+    }
+
+    @Test
+    fun `a selection never becomes empty`() {
+        val one = SensorSelection.of(listOf(2))
+        assertEquals(one, one.toggle(2), "the last sensor stays")
+        assertEquals(SensorSelection.of(listOf(2, 4)), one.toggle(4))
+        assertEquals(SensorSelection.All, SensorSelection.All.toggle(0).toggle(0))
+        assertEquals(listOf(2, 4), one.toggle(4).indices)
+        assertTrue(4 in one.toggle(4))
+        assertFalse(6 in SensorSelection.All)
+        assertEquals("3+5", one.toggle(4).numbersText())
+        assertEquals("1–6", SensorSelection.All.numbersText())
+        assertEquals(SensorSelection.All, SensorSelection.of(emptyList()))
     }
 
     @Test

@@ -1,5 +1,6 @@
 package com.smartsocks.app.platform
 
+import com.smartsocks.app.live.LiveGeometry
 import com.smartsocks.app.recording.SessionStore
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.settings.DeviceChoice
@@ -109,7 +110,8 @@ fun simulatorTransport(
     clockNanos: (() -> Long)? = null,
     adjust: (SimConfig) -> SimConfig = { it },
 ): SimulatedSockTransport {
-    val config = SimConfig(mode = choice.mode)
+    // The app's layout, so the simulated forces land where the session's processor and the views place the sensors.
+    val config = SimConfig(mode = choice.mode, layout = LiveGeometry.layout)
     return SimulatedSockTransport(foot, adjust(if (choice.preloaded) config.preloadedInsole() else config), clockNanos)
 }
 

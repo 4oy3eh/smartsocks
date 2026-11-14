@@ -12,6 +12,7 @@ import com.smartsocks.core.playback.PlaybackSample
 import com.smartsocks.core.playback.SessionTimeline
 import com.smartsocks.core.protocol.SENSOR_COUNT
 import com.smartsocks.core.settings.DeviceChoice
+import com.smartsocks.core.settings.SensorSelection
 import kotlin.math.max
 
 /**
@@ -25,10 +26,26 @@ class PlaybackOverview(
     val right: FloatArray,
     /** Highest total load of either foot; at least 1 so it can always divide. */
     val maxTotal: Float,
-    /** Highest single-sensor load, µS: the colour scale of the COP view. */
-    val maxSensorLoad: Float,
+    /**
+     * Highest sum of the loads of each set of sensors over the session (either foot), indexed by
+     * [SensorSelection.mask]: entry `1 shl i` is sensor i's peak, the full mask the peak of the sum of all.
+     */
+    private val maxSubsetLoads: FloatArray = FloatArray(SensorSelection.ALL_MASK + 1),
 ) {
     val buckets: Int get() = left.size
+
+    /** Highest single-sensor load, µS: the colour scale of the COP view. */
+    val maxSensorLoad: Float get() = maxSensorLoad(SensorSelection.ALL_MASK)
+
+    /** Highest single-sensor load among the sensors in [mask] (a [SensorSelection.mask]); 0 without data. */
+    fun maxSensorLoad(mask: Int): Float {
+        var m = 0f
+        for (s in 0 until SENSOR_COUNT) if ((mask shr s) and 1 == 1) m = max(m, maxSubsetLoads[1 shl s])
+        return m
+    }
+
+    /** Highest sum of the loads of the sensors in [mask] at any one moment; 0 without data. */
+    fun maxSelectedLoad(mask: Int): Float = maxSubsetLoads[mask]
 
     fun foot(foot: Foot): FloatArray = if (foot == Foot.LEFT) left else right
 
@@ -44,7 +61,9 @@ class PlaybackOverview(
             val start = timeline.startMillis
             val span = timeline.durationMillis
             var maxTotal = 0f
-            var maxSensor = 0f
+            val loads = FloatArray(SENSOR_COUNT)
+            val sums = FloatArray(SensorSelection.ALL_MASK + 1)
+            val maxSums = FloatArray(SensorSelection.ALL_MASK + 1)
             val arrays = Foot.entries.map { foot ->
                 val out = FloatArray(buckets) { Float.NaN }
                 val track = timeline.track(foot)
@@ -57,7 +76,14 @@ class PlaybackOverview(
                     if (v > maxTotal) maxTotal = v
                     for (s in 0 until SENSOR_COUNT) {
                         val load = track.loadAt(i, s).toFloat()
-                        if (load.isFinite() && load > maxSensor) maxSensor = load
+                        loads[s] = if (load.isFinite()) load else 0f
+                    }
+                    // Every subset's sum from a smaller one: 63 additions per sample.
+                    for (m in 1 until sums.size) {
+                        val lowest = m and -m
+                        val sum = sums[m xor lowest] + loads[lowest.countTrailingZeroBits()]
+                        sums[m] = sum
+                        if (sum > maxSums[m]) maxSums[m] = sum
                     }
                 }
                 out
@@ -68,7 +94,7 @@ class PlaybackOverview(
                 left = arrays[0],
                 right = arrays[1],
                 maxTotal = max(maxTotal, 1f),
-                maxSensorLoad = maxSensor,
+                maxSubsetLoads = maxSums,
             )
         }
     }

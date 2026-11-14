@@ -3,6 +3,7 @@ package com.smartsocks.core.recording
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.Point
+import com.smartsocks.core.model.SensorLayout
 import com.smartsocks.core.protocol.MeasurementRange
 import com.smartsocks.core.protocol.SENSOR_COUNT
 import com.smartsocks.core.protocol.SampleRate
@@ -10,7 +11,8 @@ import com.smartsocks.core.session.TimedPacket
 
 /**
  * Describes a recording in its header. [startTimeIso] comes from the caller: core has no wall clock. [feet]: the feet
- * recorded from the start; another foot may join later (see [CsvRecorder]).
+ * recorded from the start; another foot may join later (see [CsvRecorder]). [layout]: the sensor layout the COP
+ * columns were computed with (the session's).
  */
 data class RecordingMetadata(
     val startTimeIso: String,
@@ -18,6 +20,7 @@ data class RecordingMetadata(
     val range: MeasurementRange,
     val feet: Set<Foot>,
     val note: String = "SmartSocks",
+    val layout: SensorLayout = SensorLayout.Legacy,
 )
 
 /** A foot that joined a recording after it started, at its first sample [tMillis] (the file's time axis). */
@@ -30,6 +33,28 @@ internal const val MARKER_PREFIX = "# marker "
 
 /** `# foot_joined,<foot>,<t_ms>`: no `=` in it, so readers that predate it skip it as a comment. */
 internal const val FOOT_JOINED_PREFIX = "# foot_joined,"
+
+/**
+ * Header key of the sensor layout: the LEFT insole's positions in channel order, `x:y` pairs separated by `;`
+ * (`# sensor_layout=0.2590:0.9660;-0.2590:0.9660;...`). A `key=value` line like the others, which readers that
+ * predate it keep as an unknown header entry.
+ */
+internal const val LAYOUT_KEY = "sensor_layout"
+
+internal fun encodeLayout(layout: SensorLayout): String =
+    layout.positions(Foot.LEFT).joinToString(";") { "${formatNumber(it.x, 4)}:${formatNumber(it.y, 4)}" }
+
+/** Null if [text] is not a valid layout. */
+internal fun decodeLayout(text: String): SensorLayout? {
+    val points = text.trim().split(';').map { pair ->
+        val xy = pair.split(':')
+        if (xy.size != 2) return null
+        val x = xy[0].trim().toDoubleOrNull() ?: return null
+        val y = xy[1].trim().toDoubleOrNull() ?: return null
+        Point(x, y)
+    }
+    return runCatching { SensorLayout(points) }.getOrNull()
+}
 
 internal val CSV_COLUMNS: List<String> = buildList {
     add("t_ms")
@@ -45,6 +70,12 @@ internal val CSV_COLUMNS_V1: List<String> = CSV_COLUMNS.dropLast(1) + "calibrate
 /**
  * Writes [FootState]s as CSV: `#` header lines, a column line, then one row per sample. Resistance `r1..r6` is in
  * Ohms, loads in µS, time in ms since the first recorded sample. `baseline` is `none`, `auto` or `calibrated`.
+ *
+ * `cop_x`/`cop_y` (smoothed) and `raw_cop_x`/`raw_cop_y` are in the coordinates of the sensor layout written in the
+ * `# sensor_layout=` header ([LAYOUT_KEY]): +y towards the toes, **+x to the person's right on both feet** (so +x is
+ * medial on the left foot and lateral on the right one), in the layout's units; empty while the foot is in the air.
+ * They are only meaningful with that layout: [CsvSessionReader] converts them when it reads with another one. Files
+ * without the header (all before it) used [SensorLayout.legacy] with odd channels medial.
  *
  * Rows are in **arrival order**, not sorted by `t_ms`. With two feet in one file the first recorded sample defines
  * t = 0, and the other foot's sample clock may be anchored slightly earlier, so `t_ms` can be a little negative.
@@ -72,6 +103,7 @@ class CsvRecorder(private val sink: RecordingSink, metadata: RecordingMetadata) 
         sink.writeLine("# range=${metadata.range.name}")
         sink.writeLine("# feet=${metadata.feet.joinToString("+") { it.name }}")
         sink.writeLine("# note=${metadata.note.oneLine()}")
+        sink.writeLine("# $LAYOUT_KEY=${encodeLayout(metadata.layout)}")
         sink.writeLine(CSV_COLUMNS.joinToString(","))
     }
 

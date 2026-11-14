@@ -517,6 +517,7 @@ class LiveController(
                 foot,
                 transport,
                 config.stream,
+                layout = LiveGeometry.layout,
                 processorSettings = current.processor,
                 clockNanos = clockNanos,
                 baseline = carried?.takeIf { it.key == baselineKey }?.baseline,

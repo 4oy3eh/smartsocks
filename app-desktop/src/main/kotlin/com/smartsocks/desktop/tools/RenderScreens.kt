@@ -37,11 +37,13 @@ import com.smartsocks.core.protocol.SampleRate
 import com.smartsocks.core.session.StreamSettings
 import com.smartsocks.core.settings.AppSettings
 import com.smartsocks.core.settings.AppTheme
+import com.smartsocks.core.settings.ChartLoad
 import com.smartsocks.core.settings.ChartSettings
 import com.smartsocks.core.settings.ChartWindow
 import com.smartsocks.core.settings.DeviceChoice
 import com.smartsocks.core.settings.InMemorySettingsStore
 import com.smartsocks.core.settings.LiveView
+import com.smartsocks.core.settings.SensorSelection
 import com.smartsocks.core.settings.SettingsCodec
 import com.smartsocks.core.settings.SettingsRepository
 import com.smartsocks.core.sim.SimConfig
@@ -142,6 +144,10 @@ private val tuned = ProcessorSettings(contactOnThreshold = 35.0, contactOffThres
 
 private val chart200 = AppSettings(liveView = LiveView.CHART, stream = StreamSettings(SampleRate.HZ_200))
 private val numbers = AppSettings(liveView = LiveView.NUMBERS)
+private val twoSensors = chart200.copy(chart = ChartSettings(sensors = SensorSelection.of(listOf(0, 5))))
+private val medialSum = chart200.copy(
+    chart = ChartSettings(sensors = SensorSelection.of(listOf(0, 2, 4)), load = ChartLoad.SELECTED),
+)
 
 private val loop = 10.0 to 13.6
 
@@ -343,6 +349,21 @@ private val cases = listOf(
         warmupFrames = 420,
     ),
     Case("chart-desktop-min", 900, 600, 1f, AppTheme.LIGHT, settings = chart200, warmupFrames = 420),
+    // Two sensors chosen; the load panel summing the medial sensors.
+    Case("chart-sensors2-desktop-light", 1120, 760, 1f, AppTheme.LIGHT, settings = twoSensors, warmupFrames = 420),
+    Case("chart-selected-desktop-dark", 1120, 760, 1f, AppTheme.DARK, settings = medialSum, warmupFrames = 420),
+    Case("chart-selected-phone", 360, 780, 2.5f, AppTheme.LIGHT, settings = medialSum, warmupFrames = 420),
+    Case(
+        "player-chart-selected-phone-dark",
+        360,
+        780,
+        2.5f,
+        AppTheme.DARK,
+        Screen.PLAYER,
+        settings = medialSum,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.CHART, 12.33),
+    ),
     Case("chart-phone", 360, 780, 2.5f, AppTheme.LIGHT, settings = chart200, warmupFrames = 420),
     // One foot without a device: its legend says so, its lines are missing.
     Case(

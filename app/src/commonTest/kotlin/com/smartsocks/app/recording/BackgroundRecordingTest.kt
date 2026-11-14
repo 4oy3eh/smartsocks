@@ -56,6 +56,10 @@ class BackgroundRecordingTest {
             lastRequest = request
         }
 
+        override fun changeType(type: KeepAliveType, request: Long) {
+            calls += "change $type for $request"
+        }
+
         override fun stop() {
             calls += "stop"
         }
@@ -321,22 +325,140 @@ class BackgroundRecordingTest {
         assertTrue(f.recorder.start())
         runCurrent()
         f.background.onKeepAliveStarted(f.keepAlive.lastRequest)
-        f.live.right.connect()
         advance(1_000)
-        assertTrue(f.bothStreaming())
-        assertEquals(setOf(Foot.LEFT), assertIs<RecordingState.Recording>(f.recorder.state.value).feet)
+        val recording = assertIs<RecordingState.Recording>(f.recorder.state.value)
+        assertEquals(setOf(Foot.LEFT), recording.feet)
+        assertEquals(emptySet(), recording.waiting, "disconnected by the user: not expected")
 
         f.background.onBackground()
         advance(1_000)
         assertTrue(f.streaming(Foot.LEFT))
-        assertFalse(f.streaming(Foot.RIGHT), "not recorded: paused in the background")
         assertEquals(setOf(Foot.RIGHT), f.live.pausedFeet.value)
-        assertTrue(f.live.right.wantsConnection, "the request is kept")
+        assertIs<RecordingState.Recording>(f.recorder.state.value)
 
         f.background.onForeground()
         advance(1_000)
-        assertTrue(f.bothStreaming())
         assertEquals(emptySet(), f.live.pausedFeet.value)
+        assertEquals(LinkState.Idle, f.live.right.status.value.state, "still as the user left it")
+    }
+
+    @Test
+    fun aFootConnectedWhileRecordingJoinsAndStreamsOnInTheBackground() = runTest {
+        val f = fixture()
+        f.background.onForeground()
+        advance(1_000)
+        f.live.right.disconnect()
+        advance(500)
+        assertTrue(f.recorder.start())
+        runCurrent()
+        f.background.onKeepAliveStarted(f.keepAlive.lastRequest)
+        f.live.right.connect()
+        advance(1_000)
+        assertTrue(f.bothStreaming())
+        assertEquals(Foot.entries.toSet(), assertIs<RecordingState.Recording>(f.recorder.state.value).feet)
+
+        f.background.onBackground()
+        advance(2_000)
+        assertTrue(f.bothStreaming(), "a joined foot is a recorded foot")
+        assertEquals(emptySet(), f.live.pausedFeet.value)
+        f.recorder.stopAndJoin()
+        val timeline = SessionTimeline.read(f.store.lines(f.store.entries.keys.single()))
+        assertEquals(Foot.entries.toSet(), timeline.feet)
+        assertTrue(timeline.track(Foot.RIGHT).lastMillis!! > 2_500, "the right foot recorded in the background")
+    }
+
+    /**
+     * Recording in the background with the left foot streaming and the right one (a Bluetooth sock) waiting to join:
+     * its link drops before Record and does not open again until [TestSocks.failOpen] is cleared.
+     */
+    private fun TestScope.recordingWithRightWaiting(socks: TestSocks): Fixture {
+        val bt = DeviceChoice.Bluetooth("00:16:A4:00:00:02", "Block 3")
+        val f = fixture(AppSettings(right = bt), devices = socks)
+        f.background.onForeground()
+        advance(1_000)
+        assertTrue(f.bothStreaming())
+        socks.failOpen = true
+        socks.latest(Foot.RIGHT).drop()
+        advance(50)
+        assertTrue(f.recorder.start())
+        runCurrent()
+        val recording = assertIs<RecordingState.Recording>(f.recorder.state.value)
+        assertEquals(setOf(Foot.LEFT), recording.feet)
+        assertEquals(setOf(Foot.RIGHT), recording.waiting)
+        // The expected Bluetooth sock decides the type, though only a simulator streams yet.
+        assertEquals(listOf("start ${KeepAliveType.ConnectedDevice}"), f.keepAlive.calls)
+        f.background.onKeepAliveStarted(f.keepAlive.lastRequest)
+        f.background.onBackground()
+        runCurrent()
+        return f
+    }
+
+    @Test
+    fun aBluetoothSockThatJoinsLaterUpgradesTheKeepAlive() = runTest {
+        val bt = DeviceChoice.Bluetooth("00:16:A4:00:00:02", "Block 3")
+        val f = fixture(AppSettings(right = bt))
+        f.background.onForeground()
+        advance(1_000)
+        f.live.right.disconnect()
+        advance(500)
+        assertTrue(f.recorder.start())
+        runCurrent()
+        val request = f.keepAlive.lastRequest
+        assertEquals(listOf("start ${KeepAliveType.SpecialUse}"), f.keepAlive.calls, "only the simulator so far")
+        f.background.onKeepAliveStarted(request)
+        f.live.right.connect()
+        advance(1_000)
+        assertEquals(Foot.entries.toSet(), assertIs<RecordingState.Recording>(f.recorder.state.value).feet)
+        assertEquals(
+            listOf("start ${KeepAliveType.SpecialUse}", "change ${KeepAliveType.ConnectedDevice} for $request"),
+            f.keepAlive.calls,
+        )
+        assertEquals(KeepAliveType.ConnectedDevice, f.background.lastType.value)
+        assertTrue(f.background.keptAlive.value, "still kept alive meanwhile")
+        // Never back: the sock dropping changes nothing.
+        f.live.right.disconnect()
+        advance(1_000)
+        assertEquals(2, f.keepAlive.calls.size)
+    }
+
+    @Test
+    fun aWaitingFootKeepsConnectingInTheBackgroundAndJoins() = runTest {
+        val socks = TestSocks({ testScheduler.currentTime })
+        val f = recordingWithRightWaiting(socks)
+        advance(20_000)
+        assertEquals(emptySet(), f.live.pausedFeet.value, "the waiting foot is not paused")
+        assertTrue(f.live.right.status.value.state.isRecovering)
+        assertEquals(setOf(Foot.RIGHT), assertIs<RecordingState.Recording>(f.recorder.state.value).waiting)
+        socks.failOpen = false
+        advance(31_000) // the next attempt (at most 30 s later) connects
+        assertTrue(f.bothStreaming())
+        val joined = assertIs<RecordingState.Recording>(f.recorder.state.value)
+        assertEquals(Foot.entries.toSet(), joined.feet)
+        assertEquals(emptySet(), joined.waiting)
+        advance(1_000)
+        f.recorder.stopAndJoin()
+        val timeline = SessionTimeline.read(f.store.lines(f.store.entries.keys.single()))
+        assertEquals(Foot.entries.toSet(), timeline.feet)
+        assertTrue(assertNotNull(timeline.joins[Foot.RIGHT]) > 20_000)
+    }
+
+    @Test
+    fun aWaitingFootThatNeverComesIsNoReasonToStopButNoReasonToGoOnEither() = runTest {
+        val socks = TestSocks({ testScheduler.currentTime })
+        val f = recordingWithRightWaiting(socks)
+        // The left foot streams: the right one may take as long as it likes.
+        advance(10 * 60_000L)
+        assertIs<RecordingState.Recording>(f.recorder.state.value)
+        assertTrue(f.streaming(Foot.LEFT))
+        assertEquals(emptySet(), f.live.pausedFeet.value)
+        // No recorded foot streams any more: the waiting one counts as on its way, for the usual five minutes.
+        f.live.left.disconnect()
+        advance(BackgroundRecording.RECONNECT_GIVE_UP_MILLIS - 1_000)
+        assertIs<RecordingState.Recording>(f.recorder.state.value, "the right foot may still come")
+        advance(2_000)
+        assertEquals(StopReason.LinksLost, f.recorder.lastResult.value?.reason)
+        assertEquals(setOf(Foot.RIGHT), f.recorder.lastResult.value?.neverJoined)
+        assertTrue(f.live.paused.value)
     }
 
     @Test
@@ -577,6 +699,10 @@ class BackgroundRecordingTest {
         assertEquals(0, delay(posted, posted.copy(droppedRaw = 5), 12_000))
         // Another recording: as a mark.
         assertEquals(0, delay(posted, posted.copy(id = "b"), 1_000))
+        // A foot that joins, or starts or stops waiting: as a mark.
+        val waiting = posted.copy(feet = setOf(Foot.LEFT), waiting = setOf(Foot.RIGHT))
+        assertEquals(700, delay(waiting, posted, 300))
+        assertEquals(700, delay(waiting, waiting.copy(waiting = emptySet()), 300))
     }
 
     @Test
@@ -592,6 +718,12 @@ class BackgroundRecordingTest {
         assertEquals(
             "Right foot · 1 mark · 3 raw packets dropped",
             BackgroundRecording.notificationText(base.copy(feet = setOf(Foot.RIGHT), markers = 1, droppedRaw = 3)),
+        )
+        assertEquals(
+            "Left foot · Right waiting to connect · 1 mark",
+            BackgroundRecording.notificationText(
+                base.copy(feet = setOf(Foot.LEFT), waiting = setOf(Foot.RIGHT), markers = 1),
+            ),
         )
     }
 }

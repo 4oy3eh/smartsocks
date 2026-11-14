@@ -32,6 +32,7 @@ import com.smartsocks.app.ui.SmartSocksApp
 import com.smartsocks.app.ui.SmartSocksTheme
 import com.smartsocks.core.analytics.ProcessorSettings
 import com.smartsocks.core.model.Foot
+import com.smartsocks.core.playback.SessionTimeline
 import com.smartsocks.core.protocol.SampleRate
 import com.smartsocks.core.session.StreamSettings
 import com.smartsocks.core.settings.AppSettings
@@ -67,13 +68,17 @@ import java.time.ZoneOffset
  */
 private enum class Screen { LIVE, SETTINGS, SETTINGS_EXPANDED, SESSIONS, SESSIONS_EMPTY, PLAYER }
 
-/** What the player shows: the demo session at [atSeconds] in [view], with an A–B loop and speed if given. */
+/**
+ * What the player shows: the demo session (or [sessionId]) at [atSeconds] in [view], with an A–B loop and speed if
+ * given.
+ */
 private class PlayerSetup(
     val view: LiveView,
     val atSeconds: Double,
     val loop: Pair<Double, Double>? = null,
     val speed: Double = 1.0,
     val pendingA: Double? = null,
+    val sessionId: String = DEMO_ID,
 )
 
 private class Case(
@@ -165,6 +170,27 @@ private val cases = listOf(
         AppTheme.LIGHT,
         settings = AppSettings(autoConnect = false),
         warmupFrames = 20,
+    ),
+    // Recording while the right sock is still connecting: it is waiting to join.
+    Case(
+        "live-recording-waiting-desktop-light",
+        1120,
+        760,
+        1f,
+        AppTheme.LIGHT,
+        record = true,
+        warmupFrames = 240,
+        simulator = rightFails,
+    ),
+    Case(
+        "live-recording-waiting-phone-dark",
+        360,
+        780,
+        2.5f,
+        AppTheme.DARK,
+        record = true,
+        warmupFrames = 240,
+        simulator = rightFails,
     ),
     // Sessions list.
     Case("sessions-desktop-light", 1120, 760, 1f, AppTheme.LIGHT, Screen.SESSIONS, warmupFrames = 20),
@@ -273,6 +299,37 @@ private val cases = listOf(
         Screen.PLAYER,
         warmupFrames = 20,
         player = PlayerSetup(LiveView.COP, 12.33, loop = loop),
+    ),
+    // A session whose right foot joined 6 s in: before that it shows when it joins, the chart has no right line.
+    Case(
+        "player-latejoin-cop-desktop-light",
+        1120,
+        760,
+        1f,
+        AppTheme.LIGHT,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.COP, 3.0, sessionId = LATE_JOIN_ID),
+    ),
+    Case(
+        "player-latejoin-chart-desktop-dark",
+        1120,
+        760,
+        1f,
+        AppTheme.DARK,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.CHART, 8.0, sessionId = LATE_JOIN_ID),
+    ),
+    Case(
+        "player-latejoin-numbers-phone-light",
+        360,
+        780,
+        2.5f,
+        AppTheme.LIGHT,
+        Screen.PLAYER,
+        warmupFrames = 20,
+        player = PlayerSetup(LiveView.NUMBERS, 2.0, sessionId = LATE_JOIN_ID),
     ),
     // Chart and numbers views: both feet at 200 Hz for about 7 s so that a 5 or 10 s window is full.
     Case("chart-desktop-light", 1120, 760, 1f, AppTheme.LIGHT, settings = chart200, warmupFrames = 420),
@@ -519,7 +576,7 @@ fun main(args: Array<String>) {
                 activeRecording = recorder.activeRecording,
             )
             case.player?.let { setup ->
-                val demo = platform.sessionStore.list().first { it.id == DEMO_ID }
+                val demo = platform.sessionStore.list().first { it.id == setup.sessionId }
                 val player = sessions.show(loadSession(platform.sessionStore, demo))
                 player.setView(setup.view)
                 player.setSpeed(setup.speed)
@@ -601,15 +658,26 @@ fun main(args: Array<String>) {
 }
 
 private const val DEMO_ID = "2026-11-13_14-05-22"
+private const val LATE_JOIN_ID = "2026-11-13_11-47-10"
 
 private val renderStart = System.nanoTime()
 private val renderClock: () -> Long = { System.nanoTime() - renderStart }
 
-/** A 60 s walk of both feet at 200 Hz with two markers, and two shorter recordings, made by the simulator. */
+/**
+ * A 60 s walk of both feet at 200 Hz with two markers, and three shorter recordings (one with a right foot that joined
+ * late), made by the simulator.
+ */
 private fun writeDemoSessions(dir: File) {
     var time = OffsetDateTime.of(2026, 11, 13, 9, 30, 4, 0, ZoneOffset.ofHours(1))
     val store = FileSessionStore(dir, now = { time })
-    fun demo(seconds: Double, feet: Set<Foot>, rate: SampleRate, markers: List<Pair<Double, String>>, raw: Boolean) {
+    fun demo(
+        seconds: Double,
+        feet: Set<Foot>,
+        rate: SampleRate,
+        markers: List<Pair<Double, String>>,
+        raw: Boolean,
+        joinAt: Map<Foot, Double> = emptyMap(),
+    ) {
         val rec = store.create(saveRaw = raw)
         val result = SimulatedRecording.write(
             rec.csv,
@@ -619,12 +687,16 @@ private fun writeDemoSessions(dir: File) {
             feet = feet,
             markers = markers,
             startTimeIso = rec.startTimeIso,
+            joinAtSeconds = joinAt,
         )
-        store.writeSummary(rec.id, SessionSummary(result.durationMillis, feet, result.rows, markers.size))
+        val joined = SessionTimeline.read(store.csvFile(rec.id).readLines()).joins
+        store.writeSummary(rec.id, SessionSummary(result.durationMillis, feet, result.rows, markers.size, 0, 0, joined))
     }
     demo(8.0, setOf(Foot.LEFT), SampleRate.HZ_100, emptyList(), raw = false)
     time = OffsetDateTime.of(2026, 11, 12, 18, 12, 40, 0, ZoneOffset.ofHours(1))
     demo(25.0, Foot.entries.toSet(), SampleRate.HZ_100, listOf(5.0 to "Mark 1"), raw = true)
+    time = OffsetDateTime.of(2026, 11, 13, 11, 47, 10, 0, ZoneOffset.ofHours(1))
+    demo(20.0, Foot.entries.toSet(), SampleRate.HZ_100, emptyList(), raw = false, joinAt = mapOf(Foot.RIGHT to 6.0))
     time = OffsetDateTime.of(2026, 11, 13, 14, 5, 22, 0, ZoneOffset.ofHours(1))
     demo(60.0, Foot.entries.toSet(), SampleRate.HZ_200, listOf(11.0 to "Mark 1", 38.5 to "Mark 2"), raw = true)
     // Newest first by file time: the demo session on top.

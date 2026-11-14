@@ -1,5 +1,6 @@
 package com.smartsocks.app.recording
 
+import com.smartsocks.app.live.FootStatus
 import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveController
 import com.smartsocks.core.analytics.FootState
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
@@ -45,6 +47,7 @@ sealed interface RecordingState {
 
     data class Recording(
         val id: String,
+        /** The recorded feet: those streaming at the start and those that joined since (never shrinks). */
         val feet: Set<Foot>,
         /** On the live controller's clock ([LiveController.nowNanos]): the UI derives the elapsed time from it. */
         val startedNanos: Long,
@@ -56,7 +59,19 @@ sealed interface RecordingState {
         val dropped: Long = 0,
         /** Raw packets dropped for the same reason. */
         val droppedRaw: Long = 0,
-    ) : RecordingState
+        /**
+         * Feet not recorded yet that are on their way to streaming ([isWaitingToJoin]): each joins the recording when
+         * it streams. Never overlaps [feet].
+         */
+        val waiting: Set<Foot> = emptySet(),
+    ) : RecordingState {
+        /** After a change of the feet's links: a streaming foot is recorded from now on; [waiting] is recomputed. */
+        fun following(statuses: Collection<FootStatus>): Recording {
+            val recorded = feet + statuses.filter { it.state == LinkState.Streaming }.map { it.foot }
+            val waiting = statuses.filter { it.foot !in recorded && it.isWaitingToJoin() }.map { it.foot }.toSet()
+            return if (recorded == feet && waiting == this.waiting) this else copy(feet = recorded, waiting = waiting)
+        }
+    }
 
     /** Writing what is still queued and closing the files. */
     data class Stopping(val id: String) : RecordingState
@@ -96,11 +111,33 @@ data class RecordingResult(
     val dropped: Long = 0,
     val droppedRaw: Long = 0,
     val error: String? = null,
+    /** The feet with samples in the recording. */
+    val feet: Set<Foot> = emptySet(),
+    /** Feet that joined after the start, with the time of their first sample (ms on the recording's time axis). */
+    val joinedMillis: Map<Foot, Double> = emptyMap(),
+    /** Feet that were waiting to connect during the recording but never streamed into it. */
+    val neverJoined: Set<Foot> = emptySet(),
 )
+
+/**
+ * The foot is configured and meant to be connected ([FootStatus.wanted]), but does not stream (yet): connecting,
+ * waiting to reconnect, held up by a fixable device problem (Bluetooth off, permission), or for a moment between two
+ * of those. While recording, such a foot that is not recorded yet is expected: it joins the recording once it
+ * streams. Based on the request rather than the momentary link state, so that a passing "idle" (a session rebuilt)
+ * does not drop it (in the background it would be paused until the foreground). Its request ends when it cannot
+ * come back by itself (disconnected by the user, reconnect off, an unusable device).
+ */
+fun FootStatus.isWaitingToJoin(): Boolean = device != DeviceChoice.None && wanted && state != LinkState.Streaming
 
 /**
  * Records the feet that stream when [start] is called into a new [SessionStore] recording: the processed samples as
  * CSV and, if [com.smartsocks.core.settings.RecordingSettings.saveRaw], every packet into a second file.
+ *
+ * A configured foot that only streams later (it was still connecting or reconnecting at the start, or the user
+ * connects it meanwhile) joins the recording from that moment: its samples and packets go into the same files, on
+ * the same time axis, so playback keeps the feet aligned; the CSV marks the join (see
+ * [com.smartsocks.core.recording.CsvRecorder]). Until then a foot on its way shows as
+ * [RecordingState.Recording.waiting].
  *
  * The sample path is never blocked: each foot's collector (in [scope]) only hands the sample to a bounded queue
  * ([queueCapacity]); formatting and writing happen in one writer coroutine on [io], which flushes the files about
@@ -179,7 +216,10 @@ class RecordingController(
     fun streamingFeet(): Set<Foot> =
         Foot.entries.filter { live.link(it).status.value.state == LinkState.Streaming }.toSet()
 
-    /** Starts recording the streaming feet; false if nothing streams or a recording is running. */
+    /**
+     * Starts recording the streaming feet (a configured foot that streams later joins); false if nothing streams or
+     * a recording is running.
+     */
     fun start(): Boolean {
         val feet = streamingFeet()
         if (feet.isEmpty()) return false
@@ -221,6 +261,11 @@ class RecordingController(
 
         /** FootState, TimedPacket, Marker or Flush: no wrapper per sample. */
         val queue = Channel<Any>(queueCapacity)
+
+        /** Every foot that was [RecordingState.Recording.waiting] at some point: reported if it never joined. */
+        @Volatile
+        var expected: Set<Foot> = emptySet()
+
         val droppedRows = AtomicLong(0)
         val droppedRaw = AtomicLong(0)
 
@@ -264,6 +309,9 @@ class RecordingController(
                 val files = store.create(saveRaw)
                 created = files
                 _activeRecording.value = files.id
+                // The header names the feet of [start] only: any other foot (even one that began to stream while the
+                // files were created) is announced by a join line with its first sample, so the file never names a
+                // foot it may then have no data of.
                 Writer(files, RecordingMetadata(files.startTimeIso, rate, range, feet))
             } catch (e: CancellationException) {
                 created?.let { discard(it) }
@@ -278,7 +326,8 @@ class RecordingController(
             // foreground service from the background); it only finishes.
             _state.update {
                 if (it == RecordingState.Starting && !queue.isClosedForSend) {
-                    RecordingState.Recording(files.id, feet, live.nowNanos())
+                    RecordingState.Recording(files.id, feet, live.nowNanos()).following(statuses())
+                        .also { r -> expected = r.waiting }
                 } else {
                     it
                 }
@@ -330,8 +379,12 @@ class RecordingController(
             runCatching { store.delete(files.id) }
         }
 
+        private fun statuses() = Foot.entries.map { live.link(it).status.value }
+
         private suspend fun feed(writer: Writer) = coroutineScope {
-            for (foot in feet) {
+            // Every foot, not only those recorded at the start: one that streams later joins (a foot without a
+            // device has no session). The devices cannot change meanwhile, see [restrict].
+            for (foot in Foot.entries) {
                 val link = live.link(foot)
                 launch(start = CoroutineStart.UNDISPATCHED) {
                     link.session.collectLatest { session -> session?.states?.collect { offer(it) } }
@@ -340,6 +393,12 @@ class RecordingController(
                     launch(start = CoroutineStart.UNDISPATCHED) {
                         link.session.collectLatest { session -> session?.rawPackets?.collect { offer(it) } }
                     }
+                }
+            }
+            launch {
+                combine(live.left.status, live.right.status) { l, r -> listOf(l, r) }.collect { statuses ->
+                    _state.update { if (it is RecordingState.Recording) it.following(statuses) else it }
+                    (_state.value as? RecordingState.Recording)?.let { expected = expected + it.waiting }
                 }
             }
             // A flush a second also when no sample comes (both feet gone): what was written reaches the disk.
@@ -380,6 +439,9 @@ class RecordingController(
                 dropped = droppedRows.load(),
                 droppedRaw = droppedRaw.load(),
                 error = error,
+                feet = writer?.feetSeen.orEmpty(),
+                joinedMillis = writer?.joinedMillis.orEmpty(),
+                neverJoined = expected - writer?.feetSeen.orEmpty(),
             )
             if (current === this) current = null
             _activeRecording.value = null
@@ -399,7 +461,14 @@ class RecordingController(
         private val rawSink = files.raw?.let(::CountingSink)
         private val csv = CsvRecorder(csvSink, metadata)
         private val raw = rawSink?.let { RawPacketRecorder(it) }
-        private val feetSeen = mutableSetOf<Foot>()
+        private val seen = mutableSetOf<Foot>()
+
+        /** The feet with a written sample; read after the writer finished. */
+        val feetSeen: Set<Foot> get() = seen.toSet()
+
+        /** Feet that joined after the start and when; read after the writer finished. */
+        val joinedMillis: Map<Foot, Double> get() = csv.joins.associate { it.foot to it.tMillis }
+
         private var firstNanos = Long.MAX_VALUE
         private var lastNanos = Long.MIN_VALUE
         private var sinceFlush = 0
@@ -421,7 +490,7 @@ class RecordingController(
                 is FootState -> {
                     csv.record(item)
                     rows++
-                    feetSeen += item.foot
+                    seen += item.foot
                     if (item.timestampNanos < firstNanos) firstNanos = item.timestampNanos
                     if (item.timestampNanos > lastNanos) lastNanos = item.timestampNanos
                 }
@@ -461,7 +530,7 @@ class RecordingController(
         }
 
         fun summary(dropped: Long, droppedRaw: Long) =
-            SessionSummary(durationMillis, feetSeen.toSet(), rows, markers, dropped, droppedRaw)
+            SessionSummary(durationMillis, feetSeen, rows, markers, dropped, droppedRaw, joinedMillis)
 
         /** Counts what goes through, for the size shown while recording. */
         private inner class CountingSink(private val inner: RecordingSink) : RecordingSink {

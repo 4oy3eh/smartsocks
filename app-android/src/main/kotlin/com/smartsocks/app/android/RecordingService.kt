@@ -52,6 +52,9 @@ class RecordingService : Service() {
     /** The keep-alive request this service runs for, see [KeepAliveContract.start]. */
     private var request = 0L
 
+    /** The type it was last asked to run as (and went foreground with, or its fallback). */
+    private var type: KeepAliveType? = null
+
     private var posted: RecordingState.Recording? = null
     private var postedAt = 0L
 
@@ -67,8 +70,9 @@ class RecordingService : Service() {
                 if (scope == null) {
                     goForeground(type, request)
                 } else {
-                    // Still running from the last recording: it now runs for this one.
+                    // Still running: for this recording now (or still), possibly as another type.
                     this.request = request
+                    if (type != this.type) retype(type)
                     live.background.onKeepAliveStarted(request)
                 }
             }
@@ -102,6 +106,7 @@ class RecordingService : Service() {
             return
         }
         this.request = request
+        this.type = type
         posted = recording
         postedAt = SystemClock.elapsedRealtime()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -132,6 +137,27 @@ class RecordingService : Service() {
                     delay(BackgroundRecording.notificationDelayMillis(last, next, since))
                     post()
                 }
+        }
+    }
+
+    /**
+     * Runs on as [type] (e.g. `connectedDevice` once a Bluetooth sock joined a recording started as `specialUse`): goes
+     * foreground again with that type. If the system refuses, it keeps running as it was.
+     */
+    private fun retype(type: KeepAliveType) {
+        if (Build.VERSION.SDK_INT < FOREGROUND_TYPES_SDK) {
+            this.type = type // types are not enforced: nothing to change
+            return
+        }
+        val recording = live.recorder.state.value as? RecordingState.Recording ?: return
+        if (tryStartForeground(
+                foregroundServiceAttempts(type, Build.VERSION.SDK_INT).first(),
+                notification(recording),
+            )
+        ) {
+            this.type = type
+            posted = recording
+            postedAt = SystemClock.elapsedRealtime()
         }
     }
 
@@ -259,6 +285,21 @@ class RecordingService : Service() {
             } catch (e: SecurityException) {
                 Log.w(TAG, "Cannot start the recording service", e)
                 onFailed(request)
+            }
+        }
+
+        override fun changeType(type: KeepAliveType, request: Long) {
+            val intent = Intent(context, RecordingService::class.java)
+                .setAction(ACTION_START)
+                .putExtra(EXTRA_TYPE, type.name)
+                .putExtra(EXTRA_REQUEST, request)
+            try {
+                // The service is in the foreground: the app may start it from the background.
+                context.startService(intent)
+            } catch (e: IllegalStateException) {
+                Log.w(TAG, "Cannot change the recording service to $type", e)
+            } catch (e: SecurityException) {
+                Log.w(TAG, "Cannot change the recording service to $type", e)
             }
         }
 

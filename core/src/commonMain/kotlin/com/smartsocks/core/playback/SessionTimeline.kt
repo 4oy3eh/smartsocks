@@ -6,6 +6,7 @@ import com.smartsocks.core.analytics.BaselineSource
 import com.smartsocks.core.analytics.FootLoad
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.Point
+import com.smartsocks.core.recording.CsvFootJoin
 import com.smartsocks.core.recording.CsvMarker
 import com.smartsocks.core.recording.CsvRow
 import com.smartsocks.core.recording.CsvSessionInfo
@@ -44,6 +45,9 @@ class PlaybackFrame(
  * A recording indexed for random access by time, like a video: per-foot [FootTrack]s, markers, and lookups for the
  * player and charts. Times are the CSV's `t_ms`, which may start slightly below zero.
  *
+ * A foot that joined the recording late (it connected after the start) simply has no samples before it joined: at
+ * those positions it shows nothing ([currentSample] is null), and [joins] says when it came.
+ *
  * Building one from a long recording takes a while (and [GaitEvents.detect] on it too): do both off the main
  * thread. For long recordings use [read] or [SessionTimelineBuilder], which never hold the rows as objects.
  */
@@ -51,18 +55,27 @@ class SessionTimeline private constructor(
     private val tracks: List<FootTrack>,
     val header: Map<String, String>,
     markers: List<CsvMarker>,
+    joins: List<CsvFootJoin>,
 ) {
     /** Keeps nothing of [session]: the rows are copied into compact tracks. */
     constructor(session: RecordedSession) : this(
         SessionTimelineBuilder().apply { session.rows.forEach(::add) }.tracks(),
         session.header,
         session.markers,
+        session.joins,
     )
 
-    internal constructor(tracks: List<FootTrack>, info: CsvSessionInfo) : this(tracks, info.header, info.markers)
+    internal constructor(tracks: List<FootTrack>, info: CsvSessionInfo) :
+        this(tracks, info.header, info.markers, info.joins)
 
-    /** Feet that have at least one sample, in [Foot] order. */
+    /** Feet that have at least one sample, in [Foot] order (also those that joined late). */
     val feet: Set<Foot> = Foot.entries.filter { !track(it).isEmpty() }.toSet()
+
+    /**
+     * The feet with samples that joined the recording after it started, and when (their first sample, `t_ms`). Empty
+     * for recordings without late joins, and for files written before joins were recorded.
+     */
+    val joins: Map<Foot, Double> = joins.filter { it.foot in feet }.associate { it.foot to it.tMillis }
 
     /** Earliest sample of any foot; 0 for a session without samples. */
     val startMillis: Double = tracks.mapNotNull { it.firstMillis }.minOrNull() ?: 0.0
@@ -121,11 +134,16 @@ class SessionTimeline private constructor(
         return track.sample(i)
     }
 
-    /** Both feet at [positionMillis], with the balance computed exactly as for live data. */
+    /**
+     * Both feet at [positionMillis], with the balance computed exactly as for live data. Before a foot that joined
+     * late ([joins]) was there, there is no balance: the other foot alone would show as carrying everything.
+     */
     fun frameAt(positionMillis: Double, stanceHalfWidth: Double = 1.0): PlaybackFrame {
         val left = currentSample(Foot.LEFT, positionMillis)
         val right = currentSample(Foot.RIGHT, positionMillis)
-        return PlaybackFrame(positionMillis, left, right, BalanceCalculator.compute(left, right, stanceHalfWidth))
+        val beforeJoin = joins.values.any { positionMillis < it }
+        val balance = if (beforeJoin) null else BalanceCalculator.compute(left, right, stanceHalfWidth)
+        return PlaybackFrame(positionMillis, left, right, balance)
     }
 
     /** Earliest sample time of any foot strictly after [tMillis], or null. */
@@ -205,8 +223,11 @@ class SessionTimelineBuilder {
     /** Rows may come in any order; they are sorted per foot (only if needed) when building. */
     fun add(row: CsvRow) = builders[row.foot.ordinal].add(row)
 
-    fun build(header: Map<String, String> = emptyMap(), markers: List<CsvMarker> = emptyList()): SessionTimeline =
-        build(CsvSessionInfo(header, markers))
+    fun build(
+        header: Map<String, String> = emptyMap(),
+        markers: List<CsvMarker> = emptyList(),
+        joins: List<CsvFootJoin> = emptyList(),
+    ): SessionTimeline = build(CsvSessionInfo(header, markers, joins = joins))
 
     fun build(info: CsvSessionInfo): SessionTimeline = SessionTimeline(tracks(), info)
 

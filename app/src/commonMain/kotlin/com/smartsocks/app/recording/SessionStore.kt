@@ -30,6 +30,8 @@ data class SessionSummary(
     val droppedRows: Long = 0,
     /** Raw packets dropped for the same reason (the raw file only). */
     val droppedRaw: Long = 0,
+    /** Feet that joined after the start (connected late), with the time of their first sample on the file's axis. */
+    val joinedMillis: Map<Foot, Double> = emptyMap(),
 ) {
     fun encode(): String = buildString {
         append("$FORMAT_KEY=1\n")
@@ -39,6 +41,12 @@ data class SessionSummary(
         append("markers=").append(markers).append('\n')
         append("dropped_rows=").append(droppedRows).append('\n')
         append("dropped_raw=").append(droppedRaw).append('\n')
+        // Only when there is one: older readers ignore unknown keys anyway.
+        if (joinedMillis.isNotEmpty()) {
+            append("joined_ms=")
+            append(joinedMillis.entries.sortedBy { it.key }.joinToString("+") { "${it.key.name}:${it.value}" })
+            append('\n')
+        }
     }
 
     companion object {
@@ -59,8 +67,18 @@ data class SessionSummary(
                 markers = values["markers"]?.toIntOrNull() ?: return null,
                 droppedRows = values["dropped_rows"]?.toLongOrNull() ?: 0,
                 droppedRaw = values["dropped_raw"]?.toLongOrNull() ?: 0,
+                joinedMillis = decodeJoined(values["joined_ms"].orEmpty()),
             )
         }
+
+        /** `RIGHT:5000.0` (several joined by `+`); anything unreadable is left out. */
+        private fun decodeJoined(text: String): Map<Foot, Double> = text.split('+').mapNotNull { part ->
+            val colon = part.indexOf(':')
+            if (colon <= 0) return@mapNotNull null
+            val foot = Foot.entries.firstOrNull { it.name == part.substring(0, colon).trim() }
+            val t = part.substring(colon + 1).trim().toDoubleOrNull()?.takeIf { it.isFinite() }
+            if (foot == null || t == null) null else foot to t
+        }.toMap()
     }
 }
 

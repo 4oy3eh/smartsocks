@@ -211,10 +211,13 @@ private fun EmptyState(title: String, text: String) {
     }
 }
 
-/** "1:42 · Both feet · 200 Hz · 3.1 MB · 2 marks". */
+/** "1:42 · Both feet · 200 Hz · 3.1 MB · 2 marks"; a foot that joined late adds e.g. "Right from 0:05". */
 internal fun sessionDetails(s: StoredSession): String = buildList {
     add(s.durationMillis?.let { PlayerController.timeText(it, tenths = false) } ?: "Duration unknown")
     add(feetText(s.feet))
+    s.summary?.joinedMillis?.entries?.sortedBy { it.key }?.forEach { (foot, t) ->
+        add("${footName(foot)} from ${PlayerController.timeText(t, tenths = false)}")
+    }
     s.header.rateHz?.let { add("$it Hz") }
     add(sizeText(s.sizeBytes))
     s.summary?.markers?.takeIf { it > 0 }?.let { add(if (it == 1) "1 mark" else "$it marks") }

@@ -18,11 +18,12 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -134,7 +135,8 @@ class LiveControllerReconnectTest {
         watching.value = false // shutting down shows the feet as down, rightly
         controller.shutdown()
         watchers.forEach { it.cancel() }
-        scope.cancel()
+        // Everything on the other threads has ended before the assertions read what it wrote.
+        scope.coroutineContext.job.cancelAndJoin()
         for (foot in Foot.entries) {
             val opens = socks.latest(foot).opens.size
             assertTrue(opens >= 6, "$foot: only $opens connects")

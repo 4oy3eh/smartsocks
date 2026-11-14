@@ -3,6 +3,7 @@ package com.smartsocks.app.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -33,6 +34,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.smartsocks.app.live.FootView
 import com.smartsocks.app.live.LiveController
@@ -128,8 +130,10 @@ internal fun LiveViewSelector(selected: LiveView, onSelect: (LiveView) -> Unit, 
                     activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                     inactiveContainerColor = MaterialTheme.colorScheme.surface,
                 ),
+                // Little padding: on a phone the three labels share the row with Record/Stop.
+                contentPadding = PaddingValues(horizontal = 4.dp),
             ) {
-                Text(v.title)
+                Text(v.title, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
         }
     }

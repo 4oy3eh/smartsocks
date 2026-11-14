@@ -189,6 +189,22 @@ class PlayerControllerTest {
     }
 
     @Test
+    fun aFootThatJoinedLateSaysWhenBeforeItsFirstSample() = runTest {
+        val p = player(loadedSession(syntheticTimeline(rightJoinsAt = 5_000.0)))
+        val before = p.snapshot(3_000.0)
+        assertNotNull(before.left.state)
+        assertNull(before.right.state, "no stale sample before it joined")
+        assertEquals("Joins at 0:05", before.right.caption)
+        assertTrue(before.right.trail.isEmpty())
+        assertNull(before.balance, "shown as –, not 100 % left")
+        val after = p.snapshot(5_200.0)
+        assertNotNull(after.right.state)
+        assertNull(after.right.caption)
+        assertNotNull(after.balance)
+        assertEquals(setOf(Foot.LEFT, Foot.RIGHT), p.timeline.feet)
+    }
+
+    @Test
     fun theOverviewHoldsEachSlicesPeakLoad() {
         val timeline = syntheticTimeline()
         val o = PlaybackOverview.of(timeline, buckets = 100)

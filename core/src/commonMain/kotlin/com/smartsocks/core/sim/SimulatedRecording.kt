@@ -26,6 +26,8 @@ object SimulatedRecording {
     /**
      * [seconds] of [feet] at [rate]; the right foot's samples are stamped half a period after the left one's (two
      * independent sample clocks). [markers] are (seconds, label), inserted at the first sample at or after them.
+     * [joinAtSeconds]: feet that connect only that long after the start (a late join): left out of the header's
+     * feet, their samples begin there.
      */
     fun write(
         csv: RecordingSink,
@@ -39,11 +41,14 @@ object SimulatedRecording {
         startTimeIso: String = "2026-01-01T00:00:00Z",
         processorSettings: ProcessorSettings = ProcessorSettings(),
         config: SimConfig = SimConfig(),
+        joinAtSeconds: Map<Foot, Double> = emptyMap(),
     ): Result {
         require(seconds > 0) { "seconds must be positive" }
         val order = Foot.entries.filter { it in feet }
         require(order.isNotEmpty()) { "no feet" }
-        val csvRecorder = CsvRecorder(csv, RecordingMetadata(startTimeIso, rate, range, feet))
+        val fromStart = feet - joinAtSeconds.keys
+        require(fromStart.isNotEmpty()) { "some foot must be recorded from the start" }
+        val csvRecorder = CsvRecorder(csv, RecordingMetadata(startTimeIso, rate, range, fromStart))
         val rawRecorder = raw?.let { RawPacketRecorder(it) }
         val sims = order.map { SimulatedSockTransport(it, config.copy(mode = mode)) }
         val processors = order.map { FootProcessor(it, settings = processorSettings) }
@@ -56,6 +61,7 @@ object SimulatedRecording {
                 for (k in order.indices) {
                     val foot = order[k]
                     val t = i * periodNanos + if (foot == Foot.RIGHT && order.size == 2) periodNanos / 2 else 0L
+                    if (t < (joinAtSeconds[foot] ?: 0.0) * 1e9) continue
                     val packet = RawPacket(sims[k].packetAt(i.toDouble() / rate.hz, range))
                     val ohms = DoubleArray(SENSOR_COUNT) { range.countsToOhms(packet.count(it)) }
                     csvRecorder.record(processors[k].process(SensorFrame(foot, t, ohms)))

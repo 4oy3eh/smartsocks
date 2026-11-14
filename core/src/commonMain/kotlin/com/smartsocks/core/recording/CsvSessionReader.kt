@@ -20,8 +20,13 @@ class CsvRow(
 
 data class CsvMarker(val tMillis: Double, val label: String)
 
-/** [header] holds the `# key=value` lines (without the marker lines). */
-class RecordedSession(val header: Map<String, String>, val rows: List<CsvRow>, val markers: List<CsvMarker>)
+/** [header] holds the `# key=value` lines (without the marker lines); [joins] the feet that joined late. */
+class RecordedSession(
+    val header: Map<String, String>,
+    val rows: List<CsvRow>,
+    val markers: List<CsvMarker>,
+    val joins: List<CsvFootJoin> = emptyList(),
+)
 
 /**
  * Everything of a recording except its rows, for [CsvSessionReader.stream]. [truncatedLastLine]: the file ended in
@@ -31,9 +36,19 @@ class CsvSessionInfo(
     val header: Map<String, String>,
     val markers: List<CsvMarker>,
     val truncatedLastLine: Boolean = false,
+    /**
+     * Feet that joined after the start (`# foot_joined` lines followed by at least one row of that foot), in file
+     * order; none in older files.
+     */
+    val joins: List<CsvFootJoin> = emptyList(),
 )
 
-/** Reads what [CsvRecorder] wrote, in format version 2 and the older version 1 (`calibrated` 1/0 as the baseline). */
+/**
+ * Reads what [CsvRecorder] wrote, in format version 2 and the older version 1 (`calibrated` 1/0 as the baseline).
+ * Files without `# foot_joined` lines (all older ones) simply have no late joins. Such a line is only information
+ * (the rows are what counts): a malformed one is skipped, and one without a row of its foot after it (a file cut
+ * right after it) is not reported.
+ */
 object CsvSessionReader {
     /**
      * Keeps every row in memory: fine for short recordings. For long ones use [stream].
@@ -42,7 +57,7 @@ object CsvSessionReader {
     fun read(lines: Iterable<String>): RecordedSession {
         val rows = mutableListOf<CsvRow>()
         val info = stream(lines) { rows += it }
-        return RecordedSession(info.header, rows, info.markers)
+        return RecordedSession(info.header, rows, info.markers, info.joins)
     }
 
     /**
@@ -58,6 +73,10 @@ object CsvSessionReader {
     fun stream(lines: Iterable<String>, onRow: (CsvRow) -> Unit): CsvSessionInfo {
         val header = LinkedHashMap<String, String>()
         val markers = mutableListOf<CsvMarker>()
+        val joins = mutableListOf<CsvFootJoin>()
+        // Per foot: the join line seen, reported with the foot's first row after it.
+        val announced = arrayOfNulls<CsvFootJoin>(Foot.entries.size)
+        val reported = BooleanArray(Foot.entries.size)
         var sawColumns = false
         var version = 0
         // A bad line is only an error once another line follows it.
@@ -72,6 +91,12 @@ object CsvSessionReader {
                     markers += parseMarker(line, index)
                 } catch (e: IllegalArgumentException) {
                     pendingError = e
+                }
+
+                line.startsWith(FOOT_JOINED_PREFIX) -> parseJoin(line)?.let { join ->
+                    // Only the first join of a foot counts (a file has one at most).
+                    val i = join.foot.ordinal
+                    if (announced[i] == null) announced[i] = join
                 }
 
                 line.startsWith("#") -> {
@@ -94,12 +119,21 @@ object CsvSessionReader {
                         pendingError = IllegalArgumentException("Line ${index + 1}: ${e.message}", e)
                         null
                     }
-                    if (row != null) onRow(row)
+                    if (row != null) {
+                        val i = row.foot.ordinal
+                        if (!reported[i]) {
+                            announced[i]?.let {
+                                joins += it
+                                reported[i] = true
+                            }
+                        }
+                        onRow(row)
+                    }
                 }
             }
         }
         checkVersion(header)
-        return CsvSessionInfo(header, markers, truncatedLastLine = pendingError != null)
+        return CsvSessionInfo(header, markers, truncatedLastLine = pendingError != null, joins = joins)
     }
 
     private fun checkVersion(header: Map<String, String>): Int {
@@ -118,6 +152,14 @@ object CsvSessionReader {
         require(time.isFinite()) { "Line ${index + 1}: marker time must be finite" }
         val label = if (space < 0) "" else body.substring(space + 1).removePrefix("label=")
         return CsvMarker(time, label)
+    }
+
+    /** Null for a malformed line. */
+    private fun parseJoin(line: String): CsvFootJoin? {
+        val parts = line.removePrefix(FOOT_JOINED_PREFIX).split(',')
+        val foot = Foot.entries.firstOrNull { it.name == parts[0] } ?: return null
+        val time = (if (parts.size == 2) parts[1].toDoubleOrNull() else null)?.takeIf { it.isFinite() } ?: return null
+        return CsvFootJoin(foot, time)
     }
 
     private fun parseRow(line: String, version: Int): CsvRow {

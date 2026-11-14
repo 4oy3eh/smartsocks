@@ -8,7 +8,10 @@ import com.smartsocks.core.protocol.SENSOR_COUNT
 import com.smartsocks.core.protocol.SampleRate
 import com.smartsocks.core.session.TimedPacket
 
-/** Describes a recording in its header. [startTimeIso] comes from the caller: core has no wall clock. */
+/**
+ * Describes a recording in its header. [startTimeIso] comes from the caller: core has no wall clock. [feet]: the feet
+ * recorded from the start; another foot may join later (see [CsvRecorder]).
+ */
 data class RecordingMetadata(
     val startTimeIso: String,
     val rate: SampleRate,
@@ -17,10 +20,16 @@ data class RecordingMetadata(
     val note: String = "SmartSocks",
 )
 
+/** A foot that joined a recording after it started, at its first sample [tMillis] (the file's time axis). */
+data class CsvFootJoin(val foot: Foot, val tMillis: Double)
+
 internal const val CSV_FORMAT_KEY = "smartsocks-csv"
 internal const val CSV_FORMAT_VERSION = 2
 internal const val RAW_FORMAT_VERSION = 2
 internal const val MARKER_PREFIX = "# marker "
+
+/** `# foot_joined,<foot>,<t_ms>`: no `=` in it, so readers that predate it skip it as a comment. */
+internal const val FOOT_JOINED_PREFIX = "# foot_joined,"
 
 internal val CSV_COLUMNS: List<String> = buildList {
     add("t_ms")
@@ -39,11 +48,22 @@ internal val CSV_COLUMNS_V1: List<String> = CSV_COLUMNS.dropLast(1) + "calibrate
  *
  * Rows are in **arrival order**, not sorted by `t_ms`. With two feet in one file the first recorded sample defines
  * t = 0, and the other foot's sample clock may be anchored slightly earlier, so `t_ms` can be a little negative.
+ *
+ * The header's `feet` are the feet recorded from the start. The first sample of any other foot (one that connected
+ * only after the recording started) is preceded by a `# foot_joined,<foot>,<t_ms>` line with that sample's time; its
+ * rows share the time axis, so the feet stay aligned. Readers of format version 2 that predate the line skip it.
  * Not thread-safe: feed it from one coroutine.
  */
 class CsvRecorder(private val sink: RecordingSink, metadata: RecordingMetadata) {
     private var startNanos: Long? = null
     private var lastNanos = 0L
+
+    /** Per [Foot.ordinal]: in the header, or joined since. */
+    private val present = BooleanArray(Foot.entries.size).also { for (foot in metadata.feet) it[foot.ordinal] = true }
+    private val _joins = mutableListOf<CsvFootJoin>()
+
+    /** The feet that joined after the start, in the order they did; see [CsvRecorder]. */
+    val joins: List<CsvFootJoin> get() = _joins
 
     init {
         sink.writeLine("# $CSV_FORMAT_KEY=$CSV_FORMAT_VERSION")
@@ -58,8 +78,14 @@ class CsvRecorder(private val sink: RecordingSink, metadata: RecordingMetadata) 
     fun record(state: FootState) {
         val start = startNanos ?: state.timestampNanos.also { startNanos = it }
         lastNanos = state.timestampNanos
+        val t = formatMillis(state.timestampNanos - start)
+        if (!present[state.foot.ordinal]) {
+            present[state.foot.ordinal] = true
+            _joins += CsvFootJoin(state.foot, parseNumber(t))
+            sink.writeLine("$FOOT_JOINED_PREFIX${state.foot.name},$t")
+        }
         val line = StringBuilder()
-        line.append(formatMillis(state.timestampNanos - start))
+        line.append(t)
         line.append(',').append(state.foot.name)
         for (ohms in state.resistanceOhms) line.append(',').append(formatNumber(ohms, 1))
         for (load in state.loads) line.append(',').append(formatNumber(load, 3))

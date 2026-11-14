@@ -126,6 +126,11 @@ data class FootStatus(
      * [LinkState.Unavailable]); [LiveController.FootLink.disconnect] drops it.
      */
     val pendingConnect: Boolean = false,
+    /**
+     * A connection is wanted (by the user or auto-connect): see [LiveController.FootLink.wantsConnection]. Also while
+     * paused, between retries, and for a moment while the session is rebuilt, unlike [state].
+     */
+    val wanted: Boolean = false,
 )
 
 /**
@@ -475,8 +480,8 @@ class LiveController(
             blockedDevice = config.device
             // Until the config changes: show whether a connect is waiting for the fix.
             request.collect { req ->
-                _status.value =
-                    FootStatus(foot, device, null, state, pendingConnect = req?.connect == true)
+                val wanted = req?.connect == true
+                _status.value = FootStatus(foot, device, null, state, pendingConnect = wanted, wanted = wanted)
             }
         }
 
@@ -552,11 +557,12 @@ class LiveController(
                         combine(
                             session.connection,
                             session.stats.map(LinkRate::of).distinctUntilChanged(),
-                            combine(request, pausedHere) { req, paused -> req?.connect == true && !paused },
+                            combine(request, pausedHere) { req, paused -> Intent(req?.connect == true, paused) },
                             settings.settings.map { it.device(foot) }.distinctUntilChanged(),
                             loop,
-                        ) { connection, rate, wanted, shown, retry ->
-                            FootStatus(foot, shown, session.displayName, linkState(connection, wanted, retry), rate)
+                        ) { connection, rate, intent, shown, retry ->
+                            val state = linkState(connection, intent.wanted && !intent.paused, retry)
+                            FootStatus(foot, shown, session.displayName, state, rate, wanted = intent.wanted)
                         }.collect { _status.value = it }
                     }
                     combine(request.filterNotNull(), pausedHere) { req, paused -> req to paused }
@@ -662,6 +668,9 @@ class LiveController(
             return settings.settings.value.autoReconnect
         }
     }
+
+    /** A foot's connect request and whether it is paused. */
+    private data class Intent(val wanted: Boolean, val paused: Boolean)
 
     /** [FootLink.keepConnected] is running and may retry; [waiting]: it is waiting for the next try. */
     private data class RetryLoop(val waiting: LinkState.Reconnecting?)

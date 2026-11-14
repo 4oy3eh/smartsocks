@@ -117,7 +117,7 @@ internal fun PlayerTopBar(player: PlayerController?, onBack: () -> Unit) {
                         sessionDetails(player.session),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }

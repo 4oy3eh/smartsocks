@@ -8,6 +8,7 @@ import com.smartsocks.app.platform.DeviceFactory
 import com.smartsocks.app.platform.DeviceResult
 import com.smartsocks.app.platform.simulatorTransport
 import com.smartsocks.app.platform.unsupportedOnThisPlatform
+import com.smartsocks.app.ui.resultText
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.playback.SessionTimeline
 import com.smartsocks.core.protocol.MeasurementRange
@@ -83,9 +84,10 @@ class RecordingControllerTest {
         io: CoroutineDispatcher = StandardTestDispatcher(testScheduler),
         queueCapacity: Int = RecordingController.DEFAULT_QUEUE_CAPACITY,
         scope: CoroutineScope = backgroundScope,
+        devices: DeviceFactory = simulators,
     ): Fixture {
         val settings = SettingsRepository(InMemorySettingsStore(SettingsCodec.encode(initial)), backgroundScope)
-        val live = LiveController(settings, simulators, backgroundScope, reconnectDelayMillis = noJitter) {
+        val live = LiveController(settings, devices, backgroundScope, reconnectDelayMillis = noJitter) {
             testScheduler.currentTime * 1_000_000
         }
         val recorder = RecordingController(live, store, settings, scope, io, queueCapacity)
@@ -187,6 +189,181 @@ class RecordingControllerTest {
         val timeline = f.timeline(id)
         assertEquals(setOf(Foot.LEFT), timeline.feet)
         assertEquals("LEFT", timeline.header["feet"])
+        val result = assertNotNull(f.recorder.lastResult.value)
+        assertTrue(result.neverJoined.isEmpty(), "a foot without a device is not expected")
+        assertTrue(result.joinedMillis.isEmpty())
+    }
+
+    private val Fixture.recording get() = assertIs<RecordingState.Recording>(recorder.state.value)
+
+    @Test
+    fun aFootConnectedAfterRecordJoinsTheRecordingFromThatMoment() = runTest {
+        val f = fixture()
+        advance(1_000)
+        f.live.right.disconnect()
+        advance(500)
+        assertEquals(LinkState.Idle, f.live.right.status.value.state)
+        assertTrue(f.recorder.start())
+        runCurrent()
+        assertEquals(setOf(Foot.LEFT), f.recording.feet)
+        assertEquals(emptySet(), f.recording.waiting, "a foot the user disconnected is not expected")
+        advance(2_000)
+        f.live.right.connect()
+        runCurrent()
+        assertEquals(setOf(Foot.RIGHT), f.recording.waiting, "connecting: on its way")
+        assertEquals(setOf(Foot.LEFT), f.recording.feet)
+        advance(1_000)
+        assertEquals(Foot.entries.toSet(), f.recording.feet, "streaming: joined")
+        assertEquals(emptySet(), f.recording.waiting)
+        advance(2_000)
+        f.recorder.stopAndJoin()
+
+        val result = assertNotNull(f.recorder.lastResult.value)
+        assertEquals(Foot.entries.toSet(), result.feet)
+        assertTrue(result.neverJoined.isEmpty())
+        // Connected 2 s into the recording, streaming 400 ms later.
+        val joinedAt = result.joinedMillis.getValue(Foot.RIGHT)
+        assertEquals(2_400.0, joinedAt, 30.0)
+        val id = f.store.entries.keys.single()
+        val timeline = f.timeline(id)
+        assertEquals(Foot.entries.toSet(), timeline.feet)
+        assertEquals("LEFT", timeline.header["feet"], "the header names the feet recorded from the start")
+        assertEquals(joinedAt, timeline.joins[Foot.RIGHT])
+        assertEquals(joinedAt, timeline.track(Foot.RIGHT).firstMillis)
+        assertEquals(0.0, timeline.track(Foot.LEFT).firstMillis)
+        assertEquals(5_000.0, timeline.durationMillis, 30.0)
+        assertEquals(260.0, timeline.track(Foot.RIGHT).size.toDouble(), 10.0)
+        assertNull(timeline.frameAt(joinedAt - 100).right)
+        // Its packets went into the raw file too.
+        val rawRight = f.store.entries.getValue(id).raw!!.lines.count { it.contains(",RIGHT,") }
+        assertEquals(timeline.track(Foot.RIGHT).size.toDouble(), rawRight.toDouble(), 3.0)
+
+        val summary = assertNotNull(f.store.summaries[id])
+        assertEquals(Foot.entries.toSet(), summary.feet)
+        assertEquals(result.joinedMillis, summary.joinedMillis)
+        assertTrue(resultText(result).contains("Right foot joined at 0:02"), resultText(result))
+    }
+
+    @Test
+    fun aFootThatStartsStreamingWhileTheFilesAreCreatedJoinsByAJoinLine() = runTest {
+        val io = GateDispatcher(StandardTestDispatcher(testScheduler))
+        val f = fixture(io = io)
+        advance(1_000)
+        f.live.right.disconnect()
+        advance(500)
+        io.open = false // the files are not created yet
+        assertTrue(f.recorder.start())
+        f.live.right.connect()
+        advance(1_000)
+        assertEquals(LinkState.Streaming, f.live.right.status.value.state)
+        assertEquals(RecordingState.Starting, f.recorder.state.value)
+        io.release()
+        runCurrent()
+        assertEquals(Foot.entries.toSet(), f.recording.feet, "it streams: recorded")
+        advance(1_000)
+        f.recorder.stopAndJoin()
+
+        val lines = f.store.lines(f.store.entries.keys.single())
+        assertTrue("# feet=LEFT" in lines, "the header names only the feet of Record")
+        assertEquals(1, lines.count { it.startsWith("# foot_joined,RIGHT,") })
+        val timeline = SessionTimeline.read(lines)
+        assertEquals(Foot.entries.toSet(), timeline.feet)
+        val joinedAt = assertNotNull(timeline.joins[Foot.RIGHT])
+        assertTrue(kotlin.math.abs(joinedAt) < 20, "about when the recording began: $joinedAt")
+    }
+
+    @Test
+    fun aFootThatJoinsDropsAndReconnectsIsAnnouncedOnce() = runTest {
+        val socks = TestSocks({ testScheduler.currentTime })
+        val f = fixture(devices = socks)
+        advance(1_000)
+        f.live.right.disconnect()
+        advance(500)
+        assertTrue(f.recorder.start())
+        advance(1_000)
+        f.live.right.connect()
+        advance(1_500)
+        assertEquals(Foot.entries.toSet(), f.recording.feet)
+        socks.latest(Foot.RIGHT).drop()
+        advance(50)
+        assertIs<LinkState.Reconnecting>(f.live.right.status.value.state)
+        assertEquals(emptySet(), f.recording.waiting, "recorded already: reconnecting, not waiting")
+        advance(1_500) // reconnected after 1 s + 400 ms
+        assertEquals(LinkState.Streaming, f.live.right.status.value.state)
+        advance(1_000)
+        f.recorder.stopAndJoin()
+
+        val lines = f.store.lines(f.store.entries.keys.single())
+        assertEquals(1, lines.count { it.startsWith("# foot_joined") }, "joined once, then just a gap")
+        val timeline = SessionTimeline.read(lines)
+        val right = timeline.track(Foot.RIGHT)
+        assertEquals(timeline.joins[Foot.RIGHT], right.firstMillis)
+        val gaps = (1 until right.size).map { right.timeAt(it) - right.timeAt(it - 1) }.filter { it > 100 }
+        assertEquals(1, gaps.size, "$gaps")
+        assertEquals(mapOf(Foot.RIGHT to right.firstMillis!!), f.recorder.lastResult.value?.joinedMillis)
+    }
+
+    @Test
+    fun aFootReconnectingAtRecordJoinsWhenItStreamsAgain() = runTest {
+        val socks = TestSocks({ testScheduler.currentTime })
+        val f = fixture(devices = socks)
+        advance(1_000)
+        socks.latest(Foot.RIGHT).drop()
+        advance(50)
+        assertIs<LinkState.Reconnecting>(f.live.right.status.value.state)
+        assertTrue(f.recorder.start())
+        runCurrent()
+        assertEquals(setOf(Foot.LEFT), f.recording.feet)
+        assertEquals(setOf(Foot.RIGHT), f.recording.waiting, "reconnecting: expected")
+        advance(1_500) // reconnected after 1 s + 400 ms
+        assertEquals(LinkState.Streaming, f.live.right.status.value.state)
+        assertEquals(Foot.entries.toSet(), f.recording.feet)
+        assertEquals(emptySet(), f.recording.waiting)
+        advance(1_000)
+        f.recorder.stopAndJoin()
+
+        val result = assertNotNull(f.recorder.lastResult.value)
+        val timeline = f.timeline(f.store.entries.keys.single())
+        assertEquals(Foot.entries.toSet(), timeline.feet)
+        val joinedAt = assertNotNull(timeline.joins[Foot.RIGHT])
+        assertTrue(joinedAt in 1_200.0..1_500.0, "$joinedAt")
+        assertEquals(joinedAt, timeline.track(Foot.RIGHT).firstMillis)
+        assertEquals(mapOf(Foot.RIGHT to joinedAt), result.joinedMillis)
+        assertTrue(result.neverJoined.isEmpty())
+    }
+
+    @Test
+    fun aFootThatNeverConnectsLeavesAOneFootRecordingThatSaysSo() = runTest {
+        val rightNeverOpens = DeviceFactory { foot, choice ->
+            when (choice) {
+                is DeviceChoice.Simulator -> DeviceResult.Ready(
+                    simulatorTransport(foot, choice) { if (foot == Foot.RIGHT) it.copy(failToConnect = true) else it },
+                )
+
+                else -> unsupportedOnThisPlatform(choice, "Test")
+            }
+        }
+        val f = fixture(devices = rightNeverOpens)
+        advance(1_000)
+        assertTrue(f.live.right.status.value.state.isRecovering)
+        assertTrue(f.recorder.start())
+        runCurrent()
+        assertEquals(setOf(Foot.RIGHT), f.recording.waiting)
+        advance(3_000)
+        assertEquals(setOf(Foot.LEFT), f.recording.feet)
+        assertEquals(setOf(Foot.RIGHT), f.recording.waiting, "still trying")
+        f.recorder.stopAndJoin()
+
+        val result = assertNotNull(f.recorder.lastResult.value)
+        assertEquals(setOf(Foot.LEFT), result.feet)
+        assertEquals(setOf(Foot.RIGHT), result.neverJoined)
+        assertTrue(result.joinedMillis.isEmpty())
+        assertTrue(resultText(result).contains("Right foot never connected"), resultText(result))
+        val id = f.store.entries.keys.single()
+        assertEquals(setOf(Foot.LEFT), f.store.summaries.getValue(id).feet)
+        val timeline = f.timeline(id)
+        assertEquals(setOf(Foot.LEFT), timeline.feet)
+        assertTrue(timeline.joins.isEmpty())
     }
 
     @Test

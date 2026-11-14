@@ -2,7 +2,7 @@ package com.smartsocks.app.recording
 
 import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveController
-import com.smartsocks.app.ui.feetText
+import com.smartsocks.app.ui.recordingFeetText
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.settings.DeviceChoice
 import com.smartsocks.core.settings.SettingsRepository
@@ -63,6 +63,12 @@ interface KeepAlive {
     /** Asks for it; must not throw (a refusal is reported with [BackgroundRecording.onKeepAliveFailed]). */
     fun start(type: KeepAliveType, request: Long)
 
+    /**
+     * While it runs for [request]: go on as [type] instead (a Bluetooth sock joined the recording). Must not throw;
+     * if the platform refuses, the running keep-alive stays as it is (nothing is reported).
+     */
+    fun changeType(type: KeepAliveType, request: Long) = Unit
+
     /** The recording is over: release it. */
     fun stop()
 
@@ -81,7 +87,10 @@ enum class BackgroundAction {
     /** Stream as asked (foreground). */
     Run,
 
-    /** Recording in the background: only the recorded feet stream, the others pause (battery). */
+    /**
+     * Recording in the background: only the recorded feet and those waiting to join stream (or keep connecting), the
+     * others pause (battery).
+     */
     RunRecorded,
 
     /** Close the links but keep what the user asked for (see [LiveController.setPaused]). */
@@ -102,7 +111,8 @@ object BackgroundPolicy {
     /**
      * [recording]: a recording is starting or running (not stopping). [keptAlive]: the platform keeps the process
      * running in the background for it. [recordedLinksUp]: some recorded foot is streaming, or on its way back
-     * (connecting, or waiting to reconnect, and not for longer than [BackgroundRecording.RECONNECT_GIVE_UP_MILLIS]).
+     * (connecting, or waiting to reconnect, and not for longer than [BackgroundRecording.RECONNECT_GIVE_UP_MILLIS]),
+     * or a foot waiting to join is on its way (within the same limit).
      */
     fun decide(
         foreground: Boolean,
@@ -157,6 +167,13 @@ class StartedScreens(private val onChange: (foreground: Boolean) -> Unit) {
  *   recording is finalized all the same: a sock that long gone is out of range or off, and an endless background
  *   recording of nothing would only drain the battery. A foot that cannot come back without the user (reconnect
  *   off, Bluetooth off, permission revoked) does not count.
+ *
+ * A configured foot that has not joined the recording yet but is on its way
+ * ([RecordingState.Recording.waiting]: still connecting or reconnecting) is expected (the user meant to record it):
+ * in the background it is not paused but keeps connecting, and joins when it streams (then it is a recorded foot).
+ * While waiting it counts like a recorded foot that reconnects: never a reason to stop, but no reason to go on longer
+ * either: the give-up above runs whenever no recorded foot streams, waiting feet or not. A foot that is neither
+ * recorded nor waiting (disconnected by the user, no device) is paused in the background as before.
  *
  * Until the first [onForeground] the policy pauses the feet (create [live] `initiallyPaused`, so that nothing
  * connects before). The owner (Android: the Application object) outlives the activity, so do [live], [recorder]
@@ -229,10 +246,15 @@ class BackgroundRecording(
         }
     }
 
-    /** Asks for the keep-alive when a recording runs, releases it when the recording's files are closed. */
+    /**
+     * Asks for the keep-alive when a recording runs, releases it when the recording's files are closed. Its type
+     * follows the recorded feet and those waiting to join: when a real sock joins a recording kept alive as
+     * [KeepAliveType.SpecialUse] (e.g. the user connects it only then), it is asked for again as
+     * [KeepAliveType.ConnectedDevice]. Never the other way: a foot that stops waiting changes nothing.
+     */
     private suspend fun followRecording() {
         recorder.state
-            .map { (it as? RecordingState.Recording)?.feet ?: if (it == RecordingState.Idle) emptySet() else null }
+            .map { (it as? RecordingState.Recording)?.kept ?: if (it == RecordingState.Idle) emptySet() else null }
             .distinctUntilChanged()
             .collect { feet ->
                 when {
@@ -253,6 +275,15 @@ class BackgroundRecording(
                         _keptAlive.value = false
                         keepAlive.stop()
                     }
+
+                    feet.isNotEmpty() -> {
+                        val request = current ?: return@collect
+                        val type = typeFor(feet)
+                        if (type == KeepAliveType.ConnectedDevice && _lastType.value == KeepAliveType.SpecialUse) {
+                            _lastType.value = type
+                            keepAlive.changeType(type, request)
+                        }
+                    }
                 }
             }
     }
@@ -264,8 +295,9 @@ class BackgroundRecording(
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun applyPolicy() {
+        // The recorded feet and those waiting to join (which stream only once they joined: recovering until then).
         val health = combine(live.left.status, live.right.status, recorder.state) { l, r, state ->
-            val feet = (state as? RecordingState.Recording)?.feet ?: Foot.entries.toSet()
+            val feet = (state as? RecordingState.Recording)?.kept ?: Foot.entries.toSet()
             val recorded = listOfNotNull(l.takeIf { Foot.LEFT in feet }, r.takeIf { Foot.RIGHT in feet })
             when {
                 recorded.any { it.state == LinkState.Streaming } -> LinksHealth.Streaming
@@ -302,22 +334,21 @@ class BackgroundRecording(
         val recording = recorder.state
             .map { it == RecordingState.Starting || it is RecordingState.Recording }
             .distinctUntilChanged()
-        combine(foreground, recording, _keptAlive, linksUp, BackgroundPolicy::decide)
+        val all = Foot.entries.toSet()
+        // While running recorded: which feet run (recorded or waiting); it may change (a waiting foot gives up).
+        val kept = recorder.state.map { (it as? RecordingState.Recording)?.kept ?: all }.distinctUntilChanged()
+        // One combine, so that leaving the foreground is acted on as promptly as before.
+        combine(foreground, recording, _keptAlive, linksUp, kept) { fg, rec, alive, up, keep ->
+            val action = BackgroundPolicy.decide(fg, rec, alive, up)
+            action to keep.takeIf { action == BackgroundAction.RunRecorded }
+        }
             .distinctUntilChanged()
-            .collect { action ->
+            .collect { (action, keep) ->
                 when (action) {
                     BackgroundAction.Run -> live.setPaused(false)
-
-                    BackgroundAction.RunRecorded -> {
-                        val all = Foot.entries.toSet()
-                        val recorded = (recorder.state.value as? RecordingState.Recording)?.feet ?: all
-                        live.setPaused(all - recorded)
-                    }
-
+                    BackgroundAction.RunRecorded -> live.setPaused(all - (keep ?: all))
                     BackgroundAction.Pause -> live.setPaused(true)
-
                     BackgroundAction.StopForBackground -> stopThenPause(StopReason.Background)
-
                     BackgroundAction.StopLinksLost -> stopThenPause(StopReason.LinksLost)
                 }
             }
@@ -330,6 +361,9 @@ class BackgroundRecording(
     }
 
     private enum class LinksHealth { Streaming, Recovering, Down }
+
+    /** The feet that keep running in the background: recorded or waiting to join. */
+    private val RecordingState.Recording.kept: Set<Foot> get() = feet + waiting
 
     companion object {
         /**
@@ -348,11 +382,12 @@ class BackgroundRecording(
         const val NOTIFICATION_DROPS_GAP_MILLIS = 10_000L
 
         /**
-         * The recording notification's text: feet, marks and drops, e.g. "Both feet · 2 marks · 12 samples
-         * dropped". Changes only with those (not with the size), so the notification is not re-posted every update.
+         * The recording notification's text: feet (and those waiting to join), marks and drops, e.g. "Left foot ·
+         * Right waiting to connect · 2 marks · 12 samples dropped". Changes only with those (not with the size), so
+         * the notification is not re-posted every update.
          */
         fun notificationText(state: RecordingState.Recording): String = buildList {
-            add(feetText(state.feet))
+            add(recordingFeetText(state.feet, state.waiting))
             if (state.markers > 0) add(if (state.markers == 1) "1 mark" else "${state.markers} marks")
             if (state.dropped > 0) add("${state.dropped} samples dropped")
             if (state.droppedRaw > 0) add("${state.droppedRaw} raw packets dropped")
@@ -369,7 +404,8 @@ class BackgroundRecording(
             sincePostMillis: Long,
         ): Long {
             if (posted == null) return 0
-            val visible = posted.id != next.id || posted.feet != next.feet || posted.markers != next.markers
+            val visible = posted.id != next.id || posted.feet != next.feet || posted.waiting != next.waiting ||
+                posted.markers != next.markers
             val gap = if (visible) NOTIFICATION_GAP_MILLIS else NOTIFICATION_DROPS_GAP_MILLIS
             return (gap - sincePostMillis).coerceAtLeast(0)
         }

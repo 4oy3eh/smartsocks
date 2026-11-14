@@ -10,6 +10,8 @@ import com.smartsocks.core.sim.SimMode
 import com.smartsocks.core.sim.SimulatedLinkException
 import com.smartsocks.core.sim.SimulatedSockTransport
 import com.smartsocks.core.transport.SockTransport
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlin.concurrent.Volatile
 
 /** The reconnect waits without jitter: 1 s, 2 s, 4 s … 30 s. */
@@ -19,7 +21,8 @@ internal val noJitter: (Int) -> Long = { ReconnectBackoff.delayMillis(it, 0.0) }
  * Simulated socks (for the simulator and Bluetooth choices; serial ports are unsupported) whose links can be made to
  * drop ([Sock.drop]) or to fail to open ([failOpen]); every open is logged with the time from [now]. A Bluetooth
  * device is subject to [problem], like on Android with Bluetooth off. [dropAfterPackets]: every link drops after
- * that many packets, see [SimConfig.disconnectAfterPackets].
+ * that many packets, see [SimConfig.disconnectAfterPackets]. Safe to use from several threads (real-time tests): the
+ * socks are created from both feet's coroutines.
  */
 internal class TestSocks(
     private val now: () -> Long,
@@ -33,7 +36,10 @@ internal class TestSocks(
     @Volatile
     var problem: DeviceResult.Unavailable? = null
 
-    val socks = mutableListOf<Sock>()
+    private val created = MutableStateFlow<List<Sock>>(emptyList())
+
+    /** Every sock created so far, oldest first (a snapshot). */
+    val socks: List<Sock> get() = created.value
 
     fun latest(foot: Foot): Sock = socks.last { it.foot == foot }
 
@@ -45,7 +51,7 @@ internal class TestSocks(
         }
         val sim = SimulatedSockTransport(foot, config.copy(mode = mode, disconnectAfterPackets = dropAfterPackets))
         val sock = Sock(foot, sim)
-        socks += sock
+        created.update { it + sock }
         return DeviceResult.Ready(sock, simulator = sim)
     }
 
@@ -53,8 +59,10 @@ internal class TestSocks(
         if (choice is DeviceChoice.Bluetooth) problem else null
 
     inner class Sock(val foot: Foot, private val sim: SimulatedSockTransport) : SockTransport by sim {
-        /** When each [open] was called, on [now]. */
-        val opens = mutableListOf<Long>()
+        /** When each [open] was called, on [now] (a snapshot; only this sock's own link writes it). */
+        @Volatile
+        var opens: List<Long> = emptyList()
+            private set
 
         /** Opened and not closed since: what holds a real port. */
         @Volatile
@@ -70,7 +78,7 @@ internal class TestSocks(
         }
 
         override suspend fun open() {
-            opens += now()
+            opens = opens + now()
             sim.open()
             if (failOpen) throw SimulatedLinkException("No answer")
             dropRequested = false

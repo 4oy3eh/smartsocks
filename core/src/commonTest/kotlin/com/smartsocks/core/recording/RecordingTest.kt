@@ -288,4 +288,73 @@ class RecordingTest {
         val markerMessage = runCatching { CsvSessionReader.read(badMarker) }.exceptionOrNull()?.message
         assertTrue(markerMessage?.contains("malformed marker") == true, "message: $markerMessage")
     }
+
+    @Test
+    fun `a foot that joins late is announced before its first row`() {
+        val sink = InMemoryRecordingSink()
+        val recorder = CsvRecorder(sink, metadata.copy(feet = setOf(Foot.LEFT)))
+        recorder.record(state(nanos = 1_000_000_000))
+        recorder.record(state(nanos = 1_010_000_000))
+        recorder.record(state(foot = Foot.RIGHT, nanos = 6_000_000_000))
+        recorder.record(state(nanos = 6_005_000_000))
+        recorder.record(state(foot = Foot.RIGHT, nanos = 6_010_000_000))
+        assertEquals("# feet=LEFT", sink.lines[4])
+        val join = sink.lines.indexOf("# foot_joined,RIGHT,5000.000")
+        assertTrue(join > 0, "${sink.lines}")
+        assertTrue(sink.lines[join + 1].startsWith("5000.000,RIGHT,"))
+        assertEquals(1, sink.lines.count { it.startsWith("# foot_joined") }, "announced once")
+        assertEquals(listOf(CsvFootJoin(Foot.RIGHT, 5000.0)), recorder.joins)
+
+        val read = CsvSessionReader.read(sink.lines)
+        assertEquals(listOf(CsvFootJoin(Foot.RIGHT, 5000.0)), read.joins)
+        assertEquals(5, read.rows.size)
+        assertEquals("LEFT", read.header["feet"])
+        assertTrue(read.header.keys.none { it.contains("joined") }, "not a header value: ${read.header}")
+    }
+
+    @Test
+    fun `feet of the header never join and files without joins have none`() {
+        val sink = InMemoryRecordingSink()
+        val recorder = CsvRecorder(sink, metadata)
+        recorder.record(state(nanos = 0))
+        recorder.record(state(foot = Foot.RIGHT, nanos = 5_000_000_000))
+        assertTrue(recorder.joins.isEmpty())
+        assertTrue(sink.lines.none { it.startsWith("# foot_joined") })
+        assertTrue(CsvSessionReader.read(sink.lines).joins.isEmpty())
+        // A version 1 file (written before joins existed) reads without any.
+        val columns = "t_ms,foot,r1,r2,r3,r4,r5,r6,load1,load2,load3,load4,load5,load6,total_load," +
+            "cop_x,cop_y,raw_cop_x,raw_cop_y,contact,calibrated"
+        val v1 = listOf("# smartsocks-csv=1", "# feet=LEFT", columns, "0.000,LEFT,1,1,1,1,1,1,1,1,1,1,1,1,6,,,,,0,0")
+        assertTrue(CsvSessionReader.stream(v1) {}.joins.isEmpty())
+    }
+
+    @Test
+    fun `a malformed join line is skipped and a join without rows after it is not reported`() {
+        val sink = InMemoryRecordingSink()
+        val recorder = CsvRecorder(sink, metadata.copy(feet = setOf(Foot.LEFT)))
+        recorder.record(state(nanos = 0))
+        recorder.record(state(foot = Foot.RIGHT, nanos = 50_000_000))
+        recorder.record(state(nanos = 60_000_000))
+        val lines = sink.lines
+        val join = lines.indexOf("# foot_joined,RIGHT,50.000")
+        // Damaged in the middle: only information, the file still reads with all its rows (and no join).
+        for (bad in listOf(
+            "# foot_joined,MIDDLE,5.000",
+            "# foot_joined,RIGHT,x",
+            "# foot_joined,RIGHT",
+            "# foot_joined,",
+        )) {
+            val damaged = lines.toMutableList().apply { set(join, bad) }
+            val read = CsvSessionReader.read(damaged)
+            assertEquals(3, read.rows.size, bad)
+            assertTrue(read.joins.isEmpty(), bad)
+        }
+        // Cut right after the join line (or in it): no row of the foot followed, so no join.
+        val cut = lines.take(join + 1)
+        assertTrue(CsvSessionReader.read(cut).joins.isEmpty())
+        assertTrue(CsvSessionReader.read(lines.take(join) + "# foot_joined,RIGH").joins.isEmpty())
+        // A row of another foot after it does not count either.
+        assertTrue(CsvSessionReader.read(cut + lines.last()).joins.isEmpty())
+        assertEquals(listOf(CsvFootJoin(Foot.RIGHT, 50.0)), CsvSessionReader.read(lines).joins)
+    }
 }

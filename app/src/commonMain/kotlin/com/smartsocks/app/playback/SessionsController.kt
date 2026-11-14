@@ -7,6 +7,7 @@ import com.smartsocks.app.recording.StoredSession
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.playback.GaitEvents
 import com.smartsocks.core.playback.SessionTimeline
+import com.smartsocks.core.recording.CsvSessionReader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -47,6 +48,10 @@ sealed interface OpenState {
  * [activeRecording] is the recording whose files are being written (see
  * [com.smartsocks.app.recording.RecordingController.activeRecording]): it cannot be opened, renamed or deleted
  * meanwhile, and once it is finished a player still showing an older state of it is closed.
+ *
+ * A recording without a summary (cut short by a crash, or killed in the background) is summarised once in the
+ * background after the list is loaded ([summarize]; unless [summarizeMissing] is off), so that the list soon shows
+ * its duration and all its feet (its header only names the feet recorded from the start).
  */
 class SessionsController(
     val store: SessionStore,
@@ -54,6 +59,7 @@ class SessionsController(
     private val io: CoroutineDispatcher,
     private val clockNanos: (() -> Long)? = null,
     val activeRecording: StateFlow<String?> = MutableStateFlow(null),
+    private val summarizeMissing: Boolean = true,
 ) {
     private val _list = MutableStateFlow<SessionList>(SessionList.Loading)
     val list: StateFlow<SessionList> = _list.asStateFlow()
@@ -73,6 +79,9 @@ class SessionsController(
 
     private var openJob: Job? = null
     private var refreshJob: Job? = null
+
+    /** Recordings without a summary already summarised (or tried): each only once. UI thread only. */
+    private val summarised = mutableSetOf<String>()
 
     /** Bumped by every [open] and [cancelOpen]: an older open never touches [opening] again. */
     @Volatile
@@ -99,14 +108,39 @@ class SessionsController(
     fun refresh() {
         refreshJob?.cancel()
         refreshJob = scope.launch {
-            _list.value = try {
+            val list = try {
                 SessionList.Loaded(withContext(io) { store.list() })
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 SessionList.Failed(e.message ?: "Cannot list the recordings")
             }
+            _list.value = list
+            if (list is SessionList.Loaded && summarizeMissing) summarizeMissing(list.sessions)
         }
+    }
+
+    /** Summarises, on [io], the recordings of [sessions] that have no summary yet (not the one being written). */
+    private suspend fun summarizeMissing(sessions: List<StoredSession>) {
+        val missing = sessions.filter { it.summary == null && !isRecording(it) && it.id !in summarised }
+        if (missing.isEmpty()) return
+        var written = false
+        for (session in missing) {
+            if (!summarised.add(session.id)) continue
+            try {
+                withContext(io) {
+                    val summary = summarize(store, session.id) ?: return@withContext
+                    // Never over one the recorder (or a read) wrote meanwhile.
+                    store.writeSummary(session.id, summary, replace = false)
+                    written = true
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Unreadable: the list shows it without a summary, opening it says why.
+            }
+        }
+        if (written) runCatching { refreshNow() }
     }
 
     fun delete(session: StoredSession) {
@@ -255,6 +289,30 @@ class SessionsController(
 }
 
 /**
+ * What a full read of recording [id] gives for its summary (duration, feet with rows, rows, markers, late joins),
+ * streamed without building a timeline; null if it has no rows. Blocking: call it off the main thread.
+ * @throws IllegalArgumentException for a malformed recording.
+ */
+fun summarize(store: SessionStore, id: String): SessionSummary? = store.read(id) { lines, _ ->
+    val rows = LongArray(Foot.entries.size)
+    var first = Double.POSITIVE_INFINITY
+    var last = Double.NEGATIVE_INFINITY
+    val info = CsvSessionReader.stream(lines) { row ->
+        rows[row.foot.ordinal]++
+        if (row.tMillis < first) first = row.tMillis
+        if (row.tMillis > last) last = row.tMillis
+    }
+    if (rows.sum() == 0L) return@read null
+    SessionSummary(
+        durationMillis = last - first,
+        feet = Foot.entries.filter { rows[it.ordinal] > 0 }.toSet(),
+        rows = rows.sum(),
+        markers = info.markers.size,
+        joinedMillis = info.joins.associate { it.foot to it.tMillis },
+    )
+}
+
+/**
  * Reads recording [session] of [store] whole into a [LoadedSession]: timeline, gait events, overview. Blocking: call
  * it off the main thread. [checkCancelled] is called every few thousand lines (throw to stop), [onProgress] gets
  * 0..1 of the file. A recording without a summary (cut short) gets one written if [writeSummary], so the list knows
@@ -287,6 +345,7 @@ fun loadSession(
             feet = timeline.feet,
             rows = Foot.entries.sumOf { timeline.track(it).size.toLong() },
             markers = timeline.markers.size,
+            joinedMillis = timeline.joins,
         )
         runCatching { store.writeSummary(session.id, summary, replace = false) }
     }

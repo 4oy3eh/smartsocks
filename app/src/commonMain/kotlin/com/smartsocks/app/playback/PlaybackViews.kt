@@ -105,9 +105,16 @@ class PlaybackViews(
             deviceName = "Recorded",
             state = if (state != null) LinkState.Streaming else LinkState.Idle,
         )
+        val joined = timeline.joins[foot]
         val caption = when {
             !recorded -> "Not recorded"
+
+            // A foot that connected only later in the recording.
+            state == null && joined != null && position < joined ->
+                "Joins at ${PlayerController.timeText(joined - timeline.startMillis, tenths = false)}"
+
             state == null -> "No data here"
+
             else -> null
         }
         return FootView(status, state, if (state == null) emptyList() else trail(foot, position), caption)

@@ -5,6 +5,7 @@ import com.smartsocks.app.recording.CountingLines
 import com.smartsocks.app.recording.MemorySessionStore
 import com.smartsocks.app.recording.SessionSummary
 import com.smartsocks.app.recording.StoredSession
+import com.smartsocks.app.ui.sessionDetails
 import com.smartsocks.core.analytics.BaselineSource
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.model.Foot
@@ -32,42 +33,51 @@ import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SessionsControllerTest {
-    /** [seconds] of the left foot at 100 Hz, in contact all along, with a marker at 1 s. */
-    private fun recording(seconds: Int = 3): List<String> {
+    /**
+     * [seconds] of the left foot at 100 Hz, in contact all along, with a marker at 1 s; the right foot too from
+     * [rightFromSecond] on (it joined late), if given.
+     */
+    private fun recording(seconds: Int = 3, rightFromSecond: Int? = null): List<String> {
         val sink = InMemoryRecordingSink()
         val recorder = CsvRecorder(
             sink,
             RecordingMetadata("2026-11-13T14:05:22+01:00", SampleRate.HZ_100, MeasurementRange.K64, setOf(Foot.LEFT)),
         )
         for (i in 0 until seconds * 100) {
-            recorder.record(
-                FootState(
-                    foot = Foot.LEFT,
-                    timestampNanos = i * 10_000_000L,
-                    resistanceOhms = DoubleArray(SENSOR_COUNT) { 20_000.0 },
-                    loads = DoubleArray(SENSOR_COUNT) { 50.0 },
-                    totalLoad = 300.0,
-                    shares = DoubleArray(SENSOR_COUNT) { 1.0 / SENSOR_COUNT },
-                    cop = Point(0.0, 0.1),
-                    rawCop = Point(0.0, 0.1),
-                    baselineSource = BaselineSource.AUTO,
-                ),
-            )
+            val feet = if (rightFromSecond != null && i >= rightFromSecond * 100) Foot.entries else listOf(Foot.LEFT)
+            for (foot in feet) {
+                recorder.record(
+                    FootState(
+                        foot = foot,
+                        timestampNanos = i * 10_000_000L,
+                        resistanceOhms = DoubleArray(SENSOR_COUNT) { 20_000.0 },
+                        loads = DoubleArray(SENSOR_COUNT) { 50.0 },
+                        totalLoad = 300.0,
+                        shares = DoubleArray(SENSOR_COUNT) { 1.0 / SENSOR_COUNT },
+                        cop = Point(0.0, 0.1),
+                        rawCop = Point(0.0, 0.1),
+                        baselineSource = BaselineSource.AUTO,
+                    ),
+                )
+            }
             if (i == 100) recorder.marker("Mark 1")
         }
         recorder.close()
         return sink.lines
     }
 
+    /** [summarize]: summarise recordings without a summary after listing (off: only opening one does). */
     private fun TestScope.controller(
         store: MemorySessionStore,
         active: MutableStateFlow<String?> = MutableStateFlow(null),
+        summarize: Boolean = false,
     ) = SessionsController(
         store,
         backgroundScope,
         StandardTestDispatcher(testScheduler),
         { testScheduler.currentTime * 1_000_000 },
         activeRecording = active,
+        summarizeMissing = summarize,
     )
 
     private fun TestScope.loaded(c: SessionsController): List<StoredSession> {
@@ -112,6 +122,64 @@ class SessionsControllerTest {
 
         c.closePlayer()
         assertNull(c.player.value)
+    }
+
+    /** A recording with the right foot from 5 s on, cut short in the middle of its last row (a crash). */
+    private fun cutLateJoin(): List<String> = recording(seconds = 8, rightFromSecond = 5).let { lines ->
+        lines.dropLast(1) + lines.last().take(20)
+    }
+
+    @Test
+    fun aRecordingCutShortWithALateFootGetsBothFeetAndTheJoinInItsSummaryWhenOpened() = runTest {
+        val store = MemorySessionStore()
+        store.texts["a"] = cutLateJoin()
+        val c = controller(store)
+        c.refresh()
+        val session = loaded(c).single()
+        assertEquals(setOf(Foot.LEFT), session.feet, "the header: the feet recorded from the start")
+        c.open(session) {}
+        runCurrent()
+        val player = assertNotNull(c.player.value)
+        assertEquals(Foot.entries.toSet(), player.timeline.feet)
+        assertEquals(mapOf(Foot.RIGHT to 5_000.0), player.timeline.joins)
+        val summary = assertNotNull(store.summaries["a"])
+        assertEquals(Foot.entries.toSet(), summary.feet)
+        assertEquals(mapOf(Foot.RIGHT to 5_000.0), summary.joinedMillis)
+        assertEquals(Foot.entries.toSet(), loaded(c).single().feet)
+    }
+
+    @Test
+    fun recordingsWithoutASummaryAreSummarisedOnceInTheBackground() = runTest {
+        val store = MemorySessionStore()
+        store.texts["cut"] = cutLateJoin()
+        store.texts["done"] = recording()
+        store.summaries["done"] = SessionSummary(1.0, setOf(Foot.LEFT), 1, 0)
+        store.texts["live"] = recording()
+        val broken = recording().toMutableList()
+        broken.add(broken.size - 1, broken.last().replace(",LEFT,", ",MIDDLE,"))
+        store.texts["broken"] = broken
+        val c = controller(store, MutableStateFlow("live"), summarize = true)
+        c.refresh()
+        val sessions = loaded(c).associateBy { it.id }
+        // Not opened: read in the background, the list reloaded.
+        val cut = assertNotNull(sessions.getValue("cut").summary)
+        assertEquals(Foot.entries.toSet(), cut.feet)
+        assertEquals(Foot.entries.toSet(), sessions.getValue("cut").feet)
+        assertEquals(mapOf(Foot.RIGHT to 5_000.0), cut.joinedMillis)
+        assertEquals(800 + 299, cut.rows.toInt(), "the row cut short is left out")
+        assertEquals(7_990.0, cut.durationMillis, 1e-6)
+        assertEquals(1, cut.markers)
+        val details = sessionDetails(sessions.getValue("cut"))
+        assertTrue(details.startsWith("0:07 · Both feet · Right from 0:05 · 100 Hz"), details)
+        assertEquals(SessionSummary(1.0, setOf(Foot.LEFT), 1, 0), store.summaries["done"], "an existing one stays")
+        assertNull(store.summaries["live"], "the recording in progress is left alone")
+        assertNull(store.summaries["broken"])
+        // Each only once: a later refresh reads nothing again (the broken one would fail again).
+        val reads = store.reads
+        assertEquals(2, reads, "the cut and the broken one")
+        c.refresh()
+        loaded(c)
+        assertEquals(reads, store.reads)
     }
 
     @Test

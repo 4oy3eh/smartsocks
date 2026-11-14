@@ -62,4 +62,18 @@ class SimulatedRecordingTest {
         // Standing: the foot carries load.
         assertTrue(timeline.track(Foot.RIGHT).totalLoadAt(49) > 50)
     }
+
+    @Test
+    fun `a foot that joins late starts there on the same time axis`() {
+        val csv = InMemoryRecordingSink()
+        val late = mapOf(Foot.RIGHT to 5.0)
+        SimulatedRecording.write(csv, null, seconds = 8.0, rate = SampleRate.HZ_100, joinAtSeconds = late)
+        assertTrue(csv.lines.contains("# feet=LEFT"))
+        val timeline = SessionTimeline.read(csv.lines)
+        assertEquals(Foot.entries.toSet(), timeline.feet)
+        assertEquals(mapOf(Foot.RIGHT to 5_005.0), timeline.joins)
+        assertEquals(5_005.0, timeline.track(Foot.RIGHT).firstMillis)
+        assertEquals(0.0, timeline.track(Foot.LEFT).firstMillis)
+        assertEquals(300, timeline.track(Foot.RIGHT).size)
+    }
 }

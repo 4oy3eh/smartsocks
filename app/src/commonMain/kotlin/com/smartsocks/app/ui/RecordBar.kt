@@ -188,15 +188,8 @@ private fun RecordingNow(
                     "REC  ${PlayerController.timeText(elapsed.longValue.toDouble(), tenths = false)}",
                     style = MaterialTheme.typography.labelLarge,
                 )
-                val parts = buildList {
-                    add(feetText(s.feet))
-                    add(sizeText(s.bytes))
-                    if (s.markers > 0) add(if (s.markers == 1) "1 mark" else "${s.markers} marks")
-                    if (s.dropped > 0) add("${s.dropped} samples dropped")
-                    if (s.droppedRaw > 0) add("${s.droppedRaw} raw packets dropped")
-                }
                 Text(
-                    parts.joinToString(" · "),
+                    recordingDetails(s),
                     style = MaterialTheme.typography.labelMedium,
                     maxLines = if (compact) 2 else 1,
                     overflow = TextOverflow.Ellipsis,
@@ -243,10 +236,26 @@ private fun ResultNotice(
     }
 }
 
+/**
+ * The line under "REC": the recorded feet, those waiting to join, size, marks and drops, e.g. "Left foot · Right
+ * waiting to connect · 820 KB · 1 mark".
+ */
+internal fun recordingDetails(s: RecordingState.Recording): String = buildList {
+    add(recordingFeetText(s.feet, s.waiting))
+    add(sizeText(s.bytes))
+    if (s.markers > 0) add(if (s.markers == 1) "1 mark" else "${s.markers} marks")
+    if (s.dropped > 0) add("${s.dropped} samples dropped")
+    if (s.droppedRaw > 0) add("${s.droppedRaw} raw packets dropped")
+}.joinToString(" · ")
+
 internal fun resultText(r: RecordingResult): String {
     val name = r.id?.let(SessionNames::display)
     val details = buildList {
         add(PlayerController.timeText(r.durationMillis, tenths = false))
+        for ((foot, t) in r.joinedMillis.entries.sortedBy { it.key }) {
+            add("${footName(foot)} foot joined at ${PlayerController.timeText(t, tenths = false)}")
+        }
+        for (foot in r.neverJoined.sorted()) add("${footName(foot)} foot never connected")
         if (r.markers > 0) add(if (r.markers == 1) "1 mark" else "${r.markers} marks")
         if (r.dropped > 0) add("${r.dropped} samples dropped (storage too slow)")
         if (r.droppedRaw > 0) add("${r.droppedRaw} raw packets dropped")
@@ -271,6 +280,15 @@ internal fun feetText(feet: Set<Foot>): String = when {
     Foot.LEFT in feet -> "Left foot"
     Foot.RIGHT in feet -> "Right foot"
     else -> "No feet"
+}
+
+internal fun footName(foot: Foot): String = if (foot == Foot.LEFT) "Left" else "Right"
+
+/** The recorded feet, then those waiting to join: "Left foot · Right waiting to connect", or just "Both feet". */
+internal fun recordingFeetText(feet: Set<Foot>, waiting: Set<Foot>): String = when (waiting.size) {
+    0 -> feetText(feet)
+    1 -> "${feetText(feet)} · ${footName(waiting.single())} waiting to connect"
+    else -> "${feetText(feet)} · Both feet waiting to connect"
 }
 
 /** "820 KB", "12.4 MB". */

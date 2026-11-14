@@ -307,6 +307,57 @@ class SessionTimelineTest {
         assertEquals(10.3, timeline.nextFrameTime(10.0), "from the first half of a frame to its end")
     }
 
+    /** The left foot from 0 s, the right one connected only 5 s later: written by the recorder, read as a file. */
+    private fun lateJoinLines(): List<String> {
+        val sink = InMemoryRecordingSink()
+        val metadata =
+            RecordingMetadata("2026-11-14T10:00:00Z", SampleRate.HZ_100, MeasurementRange.K64, setOf(Foot.LEFT))
+        val recorder = CsvRecorder(sink, metadata)
+        val start = 3_000_000_000L
+        for (i in 0 until 1000) {
+            val nanos = start + i * 10_000_000L
+            recorder.record(state(Foot.LEFT, nanos, load = 30.0))
+            if (i >= 500) recorder.record(state(Foot.RIGHT, nanos + 2_000_000L, load = 10.0))
+        }
+        return sink.lines
+    }
+
+    @Test
+    fun `a foot that joined late is shown from its join on and as no data before`() {
+        val timeline = SessionTimeline.read(lateJoinLines())
+        assertEquals(Foot.entries.toSet(), timeline.feet)
+        assertEquals(mapOf(Foot.RIGHT to 5_002.0), timeline.joins)
+        assertEquals(0.0, timeline.startMillis)
+        assertEquals(5_002.0, timeline.track(Foot.RIGHT).firstMillis)
+        assertEquals(500, timeline.track(Foot.RIGHT).size)
+
+        val before = timeline.frameAt(4_000.0)
+        assertNotNull(before.left)
+        assertNull(before.right, "nothing of the right foot before it joined, not a stale sample")
+        assertNull(before.balance, "no balance before both feet were there: not 100 % left")
+        assertNull(timeline.frameAt(5_001.0).right)
+        assertNull(timeline.frameAt(5_001.0).balance)
+        val after = timeline.frameAt(5_010.0)
+        assertEquals(5_002.0, after.right?.tMillis)
+        assertEquals(0.75, after.balance!!.left, 1e-9)
+        // Both feet on one time axis: the left foot's sample at the same moment.
+        assertEquals(5_010.0, after.left?.tMillis)
+
+        // The same from the rows kept in memory.
+        assertEquals(timeline.joins, SessionTimeline(CsvSessionReader.read(lateJoinLines())).joins)
+    }
+
+    @Test
+    fun `a file from before joins were recorded has none and still reads`() {
+        val lines = lateJoinLines().filterNot { it.startsWith("# foot_joined") }
+        val timeline = SessionTimeline.read(lines)
+        assertTrue(timeline.joins.isEmpty())
+        assertEquals(Foot.entries.toSet(), timeline.feet, "the feet come from the data")
+        assertNull(timeline.frameAt(4_000.0).right)
+        // Without the join on record it cannot know: the left foot alone carries everything, as before.
+        assertEquals(1.0, timeline.frameAt(4_000.0).balance?.left)
+    }
+
     private fun state(foot: Foot, nanos: Long, load: Double) = FootState(
         foot = foot,
         timestampNanos = nanos,

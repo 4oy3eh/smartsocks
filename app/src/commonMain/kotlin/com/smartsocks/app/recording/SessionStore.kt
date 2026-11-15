@@ -1,10 +1,12 @@
 package com.smartsocks.app.recording
 
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.protocol.MeasurementRange
 import com.smartsocks.core.protocol.SampleRate
 import com.smartsocks.core.recording.LineSource
 import com.smartsocks.core.recording.RecordingSink
+import com.smartsocks.core.recording.recordedGains
 import com.smartsocks.core.session.StreamSettings
 
 /** What a recording's `#` header says about it (read from the first lines only). */
@@ -14,6 +16,8 @@ data class SessionHeader(
     val feet: Set<Foot> = emptySet(),
     /** The measurement range the packets were recorded at: what their counts convert with. */
     val range: MeasurementRange? = null,
+    /** The balance gains the recorded loads include (neutral for files from before them). */
+    val gains: FootGains = FootGains.NEUTRAL,
 ) {
     /** The stream settings the recording was made with, if the header names both. */
     val stream: StreamSettings?
@@ -31,6 +35,7 @@ data class SessionHeader(
                 Foot.entries.firstOrNull { it.name == name.trim() }
             }.toSet(),
             range = header["range"]?.trim()?.let { name -> MeasurementRange.entries.firstOrNull { it.name == name } },
+            gains = recordedGains(header),
         )
     }
 }
@@ -179,6 +184,9 @@ interface SessionFileUsers {
 
     /** Recording [oldId] is now called [newId]. */
     fun renamed(oldId: String, newId: String)
+
+    /** Recording [id] was deleted: forget what is remembered about it. */
+    fun deleted(id: String) = Unit
 
     companion object {
         val None: SessionFileUsers = object : SessionFileUsers {

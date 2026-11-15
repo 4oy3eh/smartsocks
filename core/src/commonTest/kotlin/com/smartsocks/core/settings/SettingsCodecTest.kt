@@ -1,5 +1,6 @@
 package com.smartsocks.core.settings
 
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.analytics.ProcessorSettings
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.protocol.MeasurementRange
@@ -9,6 +10,8 @@ import com.smartsocks.core.sim.SimMode
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class SettingsCodecTest {
@@ -318,5 +321,92 @@ class SettingsCodecTest {
         val s = SettingsCodec.decode("smartsocks-settings=1\r\n theme =DARK\r\nautoConnect= false \r\n")
         assertEquals(AppTheme.DARK, s.theme)
         assertEquals(false, s.autoConnect)
+    }
+
+    private val serial = DeviceChoice.SerialPort("com7")
+    private val bt = DeviceChoice.Bluetooth("00:16:a4:00:00:01", "Block 3")
+
+    @Test
+    fun `balance gains round trip per pair in order`() {
+        val replay = DeviceChoice.Replay("a|b=c%7C", Foot.LEFT)
+        val settings = AppSettings(left = serial, right = bt)
+            .withCurrentGains(FootGains(1.0712, 0.9335))
+            .copy(left = replay)
+            .withCurrentGains(FootGains.NEUTRAL)
+            .copy(left = serial)
+        val read = roundTrip(settings)
+        assertEquals(settings.balanceGains, read.balanceGains)
+        assertEquals(settings.balanceGains.keys.toList(), read.balanceGains.keys.toList(), "oldest first")
+        assertEquals(settings, read)
+        assertEquals(FootGains(1.0712, 0.9335), read.currentGains)
+        assertEquals(FootGains.NEUTRAL, read.copy(left = replay).currentGains, "calibrated, no correction needed")
+        // By identity: the port name's case and a sock's display name do not matter.
+        val same = read.copy(
+            left = DeviceChoice.SerialPort("COM7"),
+            right = bt.copy(address = "00:16:A4:00:00:01", name = ""),
+        )
+        assertEquals(FootGains(1.0712, 0.9335), same.currentGains)
+    }
+
+    @Test
+    fun `another pair is not calibrated`() {
+        val calibrated = AppSettings(left = serial, right = bt).withCurrentGains(FootGains(1.05, 1 / 1.05))
+        assertNull(calibrated.copy(right = DeviceChoice.Bluetooth("00:16:A4:00:00:02", "")).currentGains, "replaced")
+        assertNull(calibrated.copy(left = bt, right = serial).currentGains, "sides swapped")
+        assertNull(AppSettings().currentGains)
+        assertTrue(calibrated.withCurrentGains(null).balanceGains.isEmpty())
+        assertFalse("insoleGain" in SettingsCodec.encode(AppSettings()))
+    }
+
+    @Test
+    fun `at most the newest pairs are kept`() {
+        var s = AppSettings()
+        repeat(AppSettings.MAX_BALANCE_PAIRS + 5) {
+            s =
+                s.copy(left = DeviceChoice.SerialPort("COM$it")).withCurrentGains(FootGains(1.1, 1 / 1.1))
+        }
+        assertEquals(AppSettings.MAX_BALANCE_PAIRS, s.balanceGains.size)
+        assertNull(s.copy(left = DeviceChoice.SerialPort("COM4")).currentGains, "among the oldest")
+        assertEquals(1.1, s.copy(left = DeviceChoice.SerialPort("COM36")).currentGains?.left)
+        // Recalibrating an old pair makes it the newest.
+        val again = s.copy(left = DeviceChoice.SerialPort("COM5")).withCurrentGains(FootGains.NEUTRAL)
+        assertEquals(InsolePair.of(DeviceChoice.SerialPort("COM5"), s.right), again.balanceGains.keys.last())
+        assertEquals(AppSettings.MAX_BALANCE_PAIRS, again.balanceGains.size)
+        assertEquals(again.balanceGains, roundTrip(again).balanceGains)
+    }
+
+    @Test
+    fun `replay gains are dropped with their recording`() {
+        val replay = DeviceChoice.Replay("2026-11-13_14-05-22", Foot.RIGHT)
+        val s = AppSettings(left = serial, right = replay).withCurrentGains(FootGains(1.1, 1 / 1.1))
+            .copy(right = bt).withCurrentGains(FootGains(1.2, 1 / 1.2))
+        val pruned = s.withoutReplayGains("2026-11-13_14-05-22")
+        assertEquals(listOf(InsolePair.of(serial, bt)), pruned.balanceGains.keys.toList())
+        assertSame(pruned, pruned.withoutReplayGains("other"))
+    }
+
+    @Test
+    fun `bad gain entries are skipped one by one`() {
+        val read = SettingsCodec.decode(
+            withVersion(
+                "insoleGain.0=serial:COM7|serial:COM8|1.07|0.93",
+                "insoleGain.1=serial:COM7|serial:COM9|abc|1",
+                "insoleGain.2=serial:COM7|serial:COM9|NaN|1",
+                "insoleGain.3=serial:COM7|serial:COM9|-1|1",
+                "insoleGain.4=serial:COM7|serial:COM9|9|1",
+                "insoleGain.5=|serial:COM9|1.1|1",
+                "insoleGain.6=garbage",
+                "insoleGain.7=serial:COM7|serial:COM9|1.1",
+                "insoleGain.x=serial:COM1|serial:COM2|1.1|1",
+                "insoleGain.10=bluetooth:00:11|replay:LEFT:a%7Cb|0.95|1.05",
+            ),
+        )
+        assertEquals(
+            mapOf(
+                InsolePair("serial:COM7", "serial:COM8") to FootGains(1.07, 0.93),
+                InsolePair("bluetooth:00:11", "replay:LEFT:a|b") to FootGains(0.95, 1.05),
+            ),
+            read.balanceGains,
+        )
     }
 }

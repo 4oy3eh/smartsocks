@@ -2,6 +2,7 @@ package com.smartsocks.core.recording
 
 import com.smartsocks.core.analytics.BaselineSource
 import com.smartsocks.core.analytics.CenterOfPressure
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.Point
 import com.smartsocks.core.model.SensorLayout
@@ -22,12 +23,16 @@ class CsvRow(
 
 data class CsvMarker(val tMillis: Double, val label: String)
 
-/** [header] holds the `# key=value` lines (without the marker lines); [joins] the feet that joined late. */
+/**
+ * [header] holds the `# key=value` lines (without the marker lines); [joins] the feet that joined late; [gains] the
+ * balance gains the loads include (neutral for files from before the `# gain=` header).
+ */
 class RecordedSession(
     val header: Map<String, String>,
     val rows: List<CsvRow>,
     val markers: List<CsvMarker>,
     val joins: List<CsvFootJoin> = emptyList(),
+    val gains: FootGains = FootGains.NEUTRAL,
 )
 
 /**
@@ -47,6 +52,11 @@ class CsvSessionInfo(
     val recordedLayout: SensorLayout = CsvSessionReader.LAYOUT_BEFORE_HEADER,
     /** What was done to the recorded COP to fit the layout it was read with. */
     val copConversion: CopConversion = CopConversion.NONE,
+    /**
+     * The balance gains the recorded loads include: the `# gain=` header; neutral (1.0) for files from before it, or
+     * with a malformed one.
+     */
+    val gains: FootGains = FootGains.NEUTRAL,
 )
 
 /** How [CsvSessionReader] fitted a recording's COP to the layout it reads with. */
@@ -68,7 +78,8 @@ enum class CopConversion {
 }
 
 /**
- * Reads what [CsvRecorder] wrote, in format version 2 and the older version 1 (`calibrated` 1/0 as the baseline).
+ * Reads what [CsvRecorder] wrote, in format version 3, 2 (same columns, loads without balance gains) and 1
+ * (`calibrated` 1/0 as the baseline).
  * Files without `# foot_joined` lines (all older ones) simply have no late joins. Such a line is only information
  * (the rows are what counts): a malformed one is skipped, and one without a row of its foot after it (a file cut
  * right after it) is not reported.
@@ -88,7 +99,7 @@ object CsvSessionReader {
     fun read(lines: Iterable<String>, layout: SensorLayout = SensorLayout.Legacy): RecordedSession {
         val rows = mutableListOf<CsvRow>()
         val info = stream(lines, layout) { rows += it }
-        return RecordedSession(info.header, rows, info.markers, info.joins)
+        return RecordedSession(info.header, rows, info.markers, info.joins, info.gains)
     }
 
     /**
@@ -184,6 +195,7 @@ object CsvSessionReader {
             joins = joins,
             recordedLayout = recorded,
             copConversion = conversion,
+            gains = recordedGains(header),
         )
     }
 
@@ -225,7 +237,7 @@ object CsvSessionReader {
 
     private fun checkVersion(header: Map<String, String>): Int {
         val version = header[CSV_FORMAT_KEY]?.toIntOrNull()
-        require(version == 1 || version == CSV_FORMAT_VERSION) {
+        require(version != null && version in 1..CSV_FORMAT_VERSION) {
             "Unsupported or missing $CSV_FORMAT_KEY version: $version"
         }
         return version!!

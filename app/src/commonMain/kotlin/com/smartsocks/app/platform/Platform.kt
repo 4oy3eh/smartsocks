@@ -68,6 +68,11 @@ sealed interface DeviceResult {
         val reconnects: Boolean = transport !is ReplaySockTransport,
         /** The replay behind [transport], if it is one, so that its loop setting can be switched live. */
         val replay: ReplaySockTransport? = transport as? ReplaySockTransport,
+        /**
+         * A replay's: the balance gain the recording's loads were made with (its `# gain=` header, 1.0 for older
+         * files), used while the replayed pair has no balance calibration of its own.
+         */
+        val recordedGain: Double? = null,
     ) : DeviceResult
 
     data class Unavailable(val message: String, val reason: UnavailableReason = UnavailableReason.Unsupported) :
@@ -177,7 +182,7 @@ fun replayDevice(choice: DeviceChoice.Replay, store: SessionStore, clock: Replay
         ReplayOptions(loop = choice.loop),
         displayName = replayName(choice),
     )
-    return DeviceResult.Ready(transport)
+    return DeviceResult.Ready(transport, recordedGain = session.header.gains.of(choice.foot))
 }
 
 /** Short, for the live screen: "Replay · 08:09:48 · L". */

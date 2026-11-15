@@ -1,5 +1,6 @@
 package com.smartsocks.app.recording
 
+import com.smartsocks.app.live.BalanceCalibrationState
 import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveController
 import com.smartsocks.app.live.TestSocks
@@ -9,6 +10,7 @@ import com.smartsocks.app.platform.DeviceResult
 import com.smartsocks.app.platform.simulatorTransport
 import com.smartsocks.app.platform.unsupportedOnThisPlatform
 import com.smartsocks.app.ui.resultText
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.playback.SessionTimeline
 import com.smartsocks.core.protocol.MeasurementRange
@@ -610,5 +612,52 @@ class RecordingControllerTest {
         runCurrent()
         assertIs<RecordingState.Recording>(f.recorder.state.value)
         assertNull(f.recorder.lastResult.value)
+    }
+
+    @Test
+    fun theFileNamesTheBalanceGainsWhichCannotChangeWhileRecording() = runTest {
+        val gains = FootGains(1.06, 1 / 1.06)
+        val initial = AppSettings().withCurrentGains(gains)
+        val f = fixture(initial)
+        advance(1_000)
+        assertEquals(gains, f.live.gains.value.gains)
+        assertTrue(f.recorder.start())
+        runCurrent()
+        val id = assertIs<RecordingState.Recording>(f.recorder.state.value).id
+        advance(500)
+        f.live.resetBalance()
+        advance(500)
+        assertEquals(gains, f.settings.settings.value.currentGains, "locked while recording")
+        assertEquals(gains.right, assertNotNull(f.live.right.latest).gain)
+        f.recorder.stop()
+        runCurrent()
+        assertTrue("# gain=left:1.0600;right:0.9434" in f.store.lines(id))
+        assertEquals(gains.left, f.timeline(id).gains.left, 1e-4)
+
+        f.live.resetBalance()
+        advance(100)
+        assertNull(f.settings.settings.value.currentGains, "free again after the recording")
+    }
+
+    @Test
+    fun aBalanceCalibrationFinishingDuringARecordingIsLocked() = runTest {
+        val f = fixture()
+        advance(2_000) // walking: auto-zero learns both zero points
+        f.settings.update { s ->
+            Foot.entries.fold(s) { acc, foot -> acc.withDevice(foot, DeviceChoice.Simulator(SimMode.Shifting)) }
+        }
+        advance(5_000) // until the walk has left auto-zero's window
+        assertTrue(f.live.calibrateBalance())
+        advance(500)
+        assertTrue(f.recorder.start())
+        runCurrent()
+        advance(11_000)
+        assertEquals(
+            BalanceCalibrationState.Failed(LiveController.BALANCE_LOCKED),
+            f.live.balanceCalibration.value,
+        )
+        assertTrue(f.settings.settings.value.balanceGains.isEmpty())
+        f.recorder.stop()
+        runCurrent()
     }
 }

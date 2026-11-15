@@ -3,6 +3,7 @@ package com.smartsocks.core.playback
 import com.smartsocks.core.analytics.Balance
 import com.smartsocks.core.analytics.BalanceCalculator
 import com.smartsocks.core.analytics.BaselineSource
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.analytics.FootLoad
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.Point
@@ -13,6 +14,7 @@ import com.smartsocks.core.recording.CsvRow
 import com.smartsocks.core.recording.CsvSessionInfo
 import com.smartsocks.core.recording.CsvSessionReader
 import com.smartsocks.core.recording.RecordedSession
+import com.smartsocks.core.recording.recordedGains
 
 /**
  * One recorded sample, materialised from a [FootTrack]. Cheap enough to create once per displayed frame; for
@@ -77,6 +79,9 @@ class SessionTimeline private constructor(
      * for recordings without late joins, and for files written before joins were recorded.
      */
     val joins: Map<Foot, Double> = joins.filter { it.foot in feet }.associate { it.foot to it.tMillis }
+
+    /** The balance gains the recorded loads include (the `# gain=` header); neutral for files from before it. */
+    val gains: FootGains = recordedGains(header)
 
     /** Earliest sample of any foot; 0 for a session without samples. */
     val startMillis: Double = tracks.mapNotNull { it.firstMillis }.minOrNull() ?: 0.0

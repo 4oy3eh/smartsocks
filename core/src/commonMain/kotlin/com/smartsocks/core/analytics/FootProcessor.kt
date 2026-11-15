@@ -5,13 +5,14 @@ import com.smartsocks.core.model.Point
 import com.smartsocks.core.model.SensorFrame
 import com.smartsocks.core.model.SensorLayout
 import com.smartsocks.core.protocol.SENSOR_COUNT
+import kotlin.math.abs
 
 /**
  * The part of one foot's sample that [BalanceCalculator] works on. Implemented by the live [FootState] and by
  * recorded playback samples, so live and replayed balance come from the same code.
  */
 interface FootLoad {
-    /** Conductance above baseline summed over the sensors, µS. */
+    /** Conductance above baseline summed over the sensors, µS, times the foot's balance gain (see [FootGains]). */
     val totalLoad: Double
 
     /** Smoothed COP; null when the foot is in the air. */
@@ -26,7 +27,10 @@ class FootState(
     val timestampNanos: Long,
     /** Raw resistance per sensor. May contain [Double.POSITIVE_INFINITY]: open circuit or over the range. */
     val resistanceOhms: DoubleArray,
-    /** Conductance above baseline per sensor, µS (≈ proportional to force). */
+    /**
+     * Conductance above baseline per sensor, µS (≈ proportional to force), times [gain]: the loads and [totalLoad] of
+     * both feet are in the same units once the L/R balance is calibrated.
+     */
     val loads: DoubleArray,
     override val totalLoad: Double,
     /** Share of the foot's total load carried by each sensor, 0..1. All zero when not in contact. */
@@ -37,6 +41,13 @@ class FootState(
     val rawCop: Point?,
     /** Where the baseline that [loads] are measured from came from. */
     val baselineSource: BaselineSource,
+    /** The balance gain [loads] were multiplied by, see [FootProcessor.gain]; 1.0 without a balance calibration. */
+    val gain: Double = 1.0,
+    /**
+     * Changes whenever the zero point [loads] are measured from changes (see [FootProcessor.baselineVersion]): two
+     * samples with the same version share one zero point.
+     */
+    val baselineVersion: Int = 0,
 ) : FootLoad {
     override val inContact: Boolean get() = cop != null
 
@@ -59,7 +70,10 @@ enum class BaselineSource {
 }
 
 data class ProcessorSettings(
-    /** Total load (µS over baseline) at or above which a lifted foot is considered to have touched down. */
+    /**
+     * Total load (µS over baseline, after the balance gain: see [FootProcessor.gain]) at or above which a lifted foot
+     * is considered to have touched down.
+     */
     val contactOnThreshold: Double = 20.0,
     /** Total load below which a foot in contact is considered lifted again. Hysteresis: keep it below the on level. */
     val contactOffThreshold: Double = 10.0,
@@ -111,10 +125,35 @@ class FootProcessor(
     private val conductance = DoubleArray(SENSOR_COUNT)
     private val autoBaseline = DoubleArray(SENSOR_COUNT)
     private var autoLearned = false
+    private var autoChanged = false
+    private var lastSource = BaselineSource.NONE
+    private var lastExplicit: Baseline? = null
+
+    /**
+     * Counts the changes of the zero point the loads are measured from: a new or cleared explicit baseline, a change
+     * of [BaselineSource], or the auto-zero baseline (while in effect) moving by more than [AUTO_STEP_MICROSIEMENS]
+     * on some sensor. Cheap; carried by every [FootState] so that a measurement over many samples (the balance
+     * calibration) can tell that they share one zero point.
+     */
+    var baselineVersion: Int = 0
+        private set
     private var contact = false
 
     var baseline: Baseline? = null
         private set
+
+    /**
+     * The insole's balance gain: every sensor's load (conductance above baseline) is multiplied by it, so the two
+     * insoles of a pair read the same for the same force (see [BalanceCalibrator]). Applied after the baseline, which
+     * stays in raw µS (auto-zero and its cap are unaffected), and **before** the contact thresholds: they mean the same
+     * in calibrated units on both feet. A uniform factor leaves the foot's own COP and shares unchanged; only the
+     * totals, the L/R balance and the combined COP see it. Takes effect with the next frame.
+     */
+    var gain: Double = 1.0
+        set(value) {
+            require(value.isFinite() && value > 0.0) { "gain must be positive and finite, was $value" }
+            field = value
+        }
 
     /** 0..1 while calibrating, null otherwise. */
     val calibrationProgress: Double? get() = calibrator?.progress
@@ -137,7 +176,9 @@ class FootProcessor(
             autoLearned = false
         } else {
             for (i in 0 until SENSOR_COUNT) {
-                autoBaseline[i] = minOf(autoBaseline[i], newSettings.autoZeroMaxMicroSiemens)
+                val capped = minOf(autoBaseline[i], newSettings.autoZeroMaxMicroSiemens)
+                if (abs(capped - autoBaseline[i]) > AUTO_STEP_MICROSIEMENS) autoChanged = true
+                autoBaseline[i] = capped
             }
         }
     }
@@ -175,7 +216,9 @@ class FootProcessor(
             rollingMin.add(frame.timestampNanos, conductance)
             if (rollingMin.totalMin < settings.autoZeroSwingFraction * rollingMin.totalMax) {
                 for (i in 0 until SENSOR_COUNT) {
-                    autoBaseline[i] = minOf(rollingMin.values[i], settings.autoZeroMaxMicroSiemens)
+                    val next = minOf(rollingMin.values[i], settings.autoZeroMaxMicroSiemens)
+                    if (abs(next - autoBaseline[i]) > AUTO_STEP_MICROSIEMENS) autoChanged = true
+                    autoBaseline[i] = next
                 }
                 autoLearned = true
             }
@@ -185,8 +228,16 @@ class FootProcessor(
             autoLearned -> BaselineSource.AUTO
             else -> BaselineSource.NONE
         }
+        if (source != lastSource || explicit !== lastExplicit || (autoChanged && source == BaselineSource.AUTO)) {
+            baselineVersion++
+        }
+        lastSource = source
+        lastExplicit = explicit
+        autoChanged = false
         val reference = explicit?.unloadedMicroSiemens ?: if (autoLearned) autoBaseline else null
         val loads = LoadModel.loadsAbove(frame, reference)
+        val gain = gain
+        if (gain != 1.0) for (i in 0 until SENSOR_COUNT) loads[i] *= gain
         val total = loads.sum()
         contact = total > 0.0 && total >= if (contact) settings.contactOffThreshold else settings.contactOnThreshold
         val cop = if (contact) CenterOfPressure.compute(loads, positions, 0.0) else null
@@ -214,9 +265,14 @@ class FootProcessor(
             cop = smoothed,
             rawCop = cop?.position,
             baselineSource = source,
+            gain = gain,
+            baselineVersion = baselineVersion,
         )
     }
 }
+
+/** An auto-zero baseline that moves by more than this (µS, on some sensor) counts as a new zero point. */
+private const val AUTO_STEP_MICROSIEMENS = 1.0
 
 private fun rollingMinimumFor(settings: ProcessorSettings): RollingMinimum? = if (settings.autoZeroSeconds > 0.0) {
     RollingMinimum((settings.autoZeroSeconds * 1e9).toLong())
@@ -235,8 +291,8 @@ data class Balance(
 object BalanceCalculator {
     /**
      * A foot that is not in contact counts as zero load (its sub-threshold noise must not skew the split); null
-     * when neither foot is in contact. Assumes both insoles have similar sensitivity; per-insole gain calibration
-     * with a known weight would make the left/right split exact.
+     * when neither foot is in contact. The loads are compared as they are: insoles of different sensitivity skew the
+     * split unless their balance gains ([FootProcessor.gain], from a [BalanceCalibrator]) even them out.
      */
     fun compute(left: FootLoad?, right: FootLoad?, stanceHalfWidth: Double = 1.0): Balance? {
         val l = if (left?.inContact == true) left.totalLoad else 0.0

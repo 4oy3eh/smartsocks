@@ -26,19 +26,6 @@ fun DeviceChoice.isSameDeviceAs(other: DeviceChoice): Boolean = when (this) {
     DeviceChoice.None, is DeviceChoice.Simulator -> false
 }
 
-/**
- * Which physical insole this is, for remembering things about it (its calibration): the port or address in upper
- * case, never the display name; for the simulator only what changes its readings (preloaded or not).
- */
-val DeviceChoice.identity: String
-    get() = when (this) {
-        DeviceChoice.None -> "none"
-        is DeviceChoice.Simulator -> "simulator:$preloaded"
-        is DeviceChoice.SerialPort -> "serial:${portName.uppercase()}"
-        is DeviceChoice.Bluetooth -> "bluetooth:${address.uppercase()}"
-        is DeviceChoice.Replay -> "replay:${foot.name}:$sessionId"
-    }
-
 /** [foot]'s device is also the other foot's. The left foot keeps it; the right one is the one in conflict. */
 fun AppSettings.deviceInUseByOtherFoot(foot: Foot): Boolean = device(foot).isSameDeviceAs(device(foot.other))
 

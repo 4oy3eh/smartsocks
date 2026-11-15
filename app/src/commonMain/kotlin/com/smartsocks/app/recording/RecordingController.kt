@@ -4,6 +4,7 @@ import com.smartsocks.app.live.FootStatus
 import com.smartsocks.app.live.LinkState
 import com.smartsocks.app.live.LiveController
 import com.smartsocks.app.live.LiveGeometry
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.recording.CsvRecorder
@@ -218,9 +219,9 @@ class RecordingController(
     val isRecording: Boolean get() = _state.value != RecordingState.Idle
 
     /**
-     * What of a settings change may take effect: while recording, the stream settings and the devices stay (a
-     * simulator's walking/standing mode and a replay's loop setting may still change: they do not rebuild the
-     * session).
+     * What of a settings change may take effect: while recording, the stream settings, the devices and the insoles'
+     * balance gains stay (a simulator's walking/standing mode and a replay's loop setting may still change: they do
+     * not rebuild the session). The gains are in the file's header, and the recorded loads include them.
      */
     fun restrict(old: AppSettings, new: AppSettings): AppSettings {
         if (!isRecording) return new
@@ -233,7 +234,12 @@ class RecordingController(
                 before.copy(loop = after.loop) == after
             return if (modeOnly || loopOnly) after else before
         }
-        return new.copy(stream = old.stream, left = keep(Foot.LEFT), right = keep(Foot.RIGHT))
+        return new.copy(
+            stream = old.stream,
+            left = keep(Foot.LEFT),
+            right = keep(Foot.RIGHT),
+            balanceGains = old.balanceGains,
+        )
     }
 
     /** The feet that stream now: what [start] would record. */
@@ -258,7 +264,11 @@ class RecordingController(
         if (!_state.compareAndSet(RecordingState.Idle, RecordingState.Starting)) return false
         _lastResult.value = null
         val s = settings.settings.value
-        val run = Run(feet, stream, s.recording.saveRaw)
+        // The gains the sessions apply (the controller's for a foot without a session yet: it joins with those).
+        val gains = Foot.entries.map { foot ->
+            live.link(foot).session.value?.gain?.value ?: live.gains.value.gains.of(foot)
+        }
+        val run = Run(feet, stream, s.recording.saveRaw, FootGains(gains[0], gains[1]))
         current = run
         run.job = scope.launch(io) { run.execute() }
         return true
@@ -283,7 +293,12 @@ class RecordingController(
         _lastResult.value = null
     }
 
-    private inner class Run(val feet: Set<Foot>, val stream: StreamSettings, val saveRaw: Boolean) {
+    private inner class Run(
+        val feet: Set<Foot>,
+        val stream: StreamSettings,
+        val saveRaw: Boolean,
+        val gains: FootGains,
+    ) {
         var job: Job? = null
 
         /** Every foot that streamed at other settings at some point while not recorded. */
@@ -346,8 +361,14 @@ class RecordingController(
                 // The header names the feet of [start] only: any other foot (even one that began to stream while the
                 // files were created) is announced by a join line with its first sample, so the file never names a
                 // foot it may then have no data of.
-                val metadata =
-                    RecordingMetadata(files.startTimeIso, stream.rate, stream.range, feet, layout = LiveGeometry.layout)
+                val metadata = RecordingMetadata(
+                    files.startTimeIso,
+                    stream.rate,
+                    stream.range,
+                    feet,
+                    layout = LiveGeometry.layout,
+                    gains = gains,
+                )
                 Writer(files, metadata)
             } catch (e: CancellationException) {
                 created?.let { discard(it) }

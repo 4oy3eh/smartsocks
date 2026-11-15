@@ -2,6 +2,7 @@ package com.smartsocks.core.recording
 
 import com.smartsocks.core.analytics.BaselineSource
 import com.smartsocks.core.analytics.CenterOfPressure
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.Point
@@ -59,7 +60,7 @@ class RecordingTest {
         CsvRecorder(sink, metadata)
         assertEquals(
             listOf(
-                "# smartsocks-csv=2",
+                "# smartsocks-csv=3",
                 "# start_time=2026-11-12T10:15:30Z",
                 "# sample_rate_hz=100",
                 "# range=K64",
@@ -68,6 +69,7 @@ class RecordingTest {
                 "# sensor_layout=" + SensorLayout.Legacy.positions(Foot.LEFT).joinToString(";") {
                     "${formatNumber(it.x, 4)}:${formatNumber(it.y, 4)}"
                 },
+                "# gain=left:1.0000;right:1.0000",
                 "t_ms,foot,r1,r2,r3,r4,r5,r6,load1,load2,load3,load4,load5,load6," +
                     "total_load,cop_x,cop_y,raw_cop_x,raw_cop_y,contact,baseline",
             ),
@@ -83,9 +85,9 @@ class RecordingTest {
         recorder.record(state(foot = Foot.RIGHT, nanos = 5_012_345_678))
         assertEquals(
             "0.000,LEFT,1000.0,2000.0,3000.0,4000.0,5000.0,6000.0,1.500,3.000,4.500,6.000,7.500,9.000,31.500,0.2500,-0.5000,0.2600,-0.5000,1,calibrated",
-            sink.lines[8],
+            sink.lines[9],
         )
-        assertTrue(sink.lines[9].startsWith("12.346,RIGHT,"))
+        assertTrue(sink.lines[10].startsWith("12.346,RIGHT,"))
     }
 
     @Test
@@ -116,7 +118,7 @@ class RecordingTest {
         recorder.record(state(nanos = 1_000_000_000))
         recorder.record(state(nanos = 1_250_000_000))
         recorder.marker("break one")
-        assertEquals("# marker t_ms=0.000 label=before", sink.lines[8])
+        assertEquals("# marker t_ms=0.000 label=before", sink.lines[9])
         assertEquals("# marker t_ms=250.000 label=break one", sink.lines.last())
     }
 
@@ -248,7 +250,7 @@ class RecordingTest {
         )
 
         val session = CsvSessionReader.read(sink.lines)
-        assertEquals("2", session.header["smartsocks-csv"])
+        assertEquals("3", session.header["smartsocks-csv"])
         assertEquals("100", session.header["sample_rate_hz"])
         assertEquals("LEFT+RIGHT", session.header["feet"])
         assertEquals(listOf(CsvMarker(0.0, "break")), session.markers)
@@ -276,7 +278,7 @@ class RecordingTest {
 
     @Test
     fun `reader rejects unknown version`() {
-        val lines = listOf("# smartsocks-csv=3")
+        val lines = listOf("# smartsocks-csv=4")
         val error = runCatching { CsvSessionReader.read(lines) }.exceptionOrNull()
         assertNotNull(error)
     }
@@ -455,5 +457,39 @@ class RecordingTest {
         // A row of another foot after it does not count either.
         assertTrue(CsvSessionReader.read(cut + lines.last()).joins.isEmpty())
         assertEquals(listOf(CsvFootJoin(Foot.RIGHT, 50.0)), CsvSessionReader.read(lines).joins)
+    }
+
+    @Test
+    fun `the gains header round trips and old files read as uncalibrated`() {
+        val sink = InMemoryRecordingSink()
+        val gains = FootGains(1.0712, 0.9335)
+        CsvRecorder(sink, metadata.copy(gains = gains)).record(state())
+        assertTrue("# gain=left:1.0712;right:0.9335" in sink.lines)
+        assertEquals(gains, CsvSessionReader.read(sink.lines).gains)
+        assertEquals(gains, CsvSessionReader.stream(sink.lines) {}.gains)
+
+        val old = sink.lines.filterNot { it.startsWith("# gain=") }
+        assertEquals(FootGains.NEUTRAL, CsvSessionReader.read(old).gains)
+        for (bad in listOf("left:x;right:1", "left:1.1;middle:1", "left:-1;right:1", "1.1")) {
+            val damaged = sink.lines.map { if (it.startsWith("# gain=")) "# gain=$bad" else it }
+            val read = CsvSessionReader.read(damaged)
+            assertEquals(FootGains.NEUTRAL, read.gains, bad)
+            assertEquals(1, read.rows.size, "the file is otherwise fine")
+        }
+        assertEquals(FootGains(1.2, 1.0), decodeGains("left:1.2"))
+    }
+
+    @Test
+    fun `version 2 files read with their loads as they are`() {
+        val sink = InMemoryRecordingSink()
+        CsvRecorder(sink, metadata).record(state())
+        val v2 = sink.lines.map { if (it == "# smartsocks-csv=3") "# smartsocks-csv=2" else it }
+            .filterNot { it.startsWith("# gain=") }
+        val read = CsvSessionReader.read(v2)
+        assertEquals(1, read.rows.size)
+        assertEquals(FootGains.NEUTRAL, read.gains)
+        assertEquals(31.5, read.rows[0].totalLoad)
+        assertEquals(FootGains(1.2, 0.9), recordedGains(mapOf("gain" to "left:1.2;right:0.9")))
+        assertEquals(FootGains.NEUTRAL, recordedGains(emptyMap()))
     }
 }

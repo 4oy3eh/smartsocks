@@ -29,6 +29,19 @@ data class SimConfig(
     /** Per-sensor sensitivity spread, ±fraction. */
     val gainSpread: Double = 0.15,
     /**
+     * Sensitivity of the whole insole on top of [gainSpread]: 1.12 reads 12 % more load for the same force. The two
+     * insoles of a pair differ like this, which is what a balance calibration evens out.
+     */
+    val sensitivity: Double = 1.0,
+    /** While standing: the share of the body weight that slowly sways from foot to foot (±, 10 s period). */
+    val standingSideSway: Double = 0.01,
+    /** Standing or shifting: the share of the body weight on the left foot on average (a habitual stance). */
+    val stanceLeftShare: Double = 0.5,
+    /** [SimMode.Shifting]: the share of the body weight moved from foot to foot (±). */
+    val shiftAmplitude: Double = 0.2,
+    /** [SimMode.Shifting]: seconds for one shift left, right and back. */
+    val shiftPeriodSeconds: Double = 4.0,
+    /**
      * Unloaded conductance of an FSR, µS. The default (~0.7 µS ≈ 1.4 MΩ) is a clean FSR: beyond every measurement
      * range, so it reads as an open circuit with zero load. See [preloadedInsole] for a leaky one.
      */
@@ -91,11 +104,22 @@ class SimulatedSockTransport(
     private val commands = MutableStateFlow<List<SockCommand>>(emptyList())
     private val commandLine = StringBuilder()
     private val random = Random(config.seed + foot.ordinal)
-    private val gains = DoubleArray(SENSOR_COUNT) { 1 + config.gainSpread * (random.nextDouble() * 2 - 1) }
+    private val gains =
+        DoubleArray(SENSOR_COUNT) { config.sensitivity * (1 + config.gainSpread * (random.nextDouble() * 2 - 1)) }
     private val leaks = DoubleArray(SENSOR_COUNT) {
         config.leakMicroSiemens * (1 + config.leakSpread * (random.nextDouble() * 2 - 1))
     }
-    private val gait = GaitModel(foot, config.bodyWeightKg, config.cadenceStepsPerMin, config.layout)
+    private val gait =
+        GaitModel(
+            foot,
+            config.bodyWeightKg,
+            config.cadenceStepsPerMin,
+            config.layout,
+            config.standingSideSway,
+            config.stanceLeftShare,
+            config.shiftAmplitude,
+            config.shiftPeriodSeconds,
+        )
     private val forces = DoubleArray(SENSOR_COUNT)
 
     @Volatile

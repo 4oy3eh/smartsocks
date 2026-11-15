@@ -17,19 +17,28 @@ enum class SimMode {
 
     /** Foot in the air: use this to calibrate. */
     Lifted,
+
+    /** Standing and slowly shifting the weight from one foot to the other: for the balance calibration. */
+    Shifting,
 }
 
 /**
  * Plausible (not biomechanically exact) per-sensor forces in Newtons for one foot.
  *
  * Which channel is medial (big-toe side) or lateral and which row it is in comes from [layout] (by default
- * [SensorLayout.Legacy]), so the simulated forces land where the views draw those channels.
+ * [SensorLayout.Legacy]), so the simulated forces land where the views draw those channels. Standing, the left foot
+ * carries [leftShare] of the body weight on average, and [sideSway] of it sways slowly from foot to foot (±, 10 s
+ * period); [SimMode.Shifting] moves [shiftAmplitude] of it (±) from foot to foot every [shiftPeriodSeconds].
  */
 class GaitModel(
     private val foot: Foot,
     private val bodyWeightKg: Double = 70.0,
     private val cadenceStepsPerMin: Double = 100.0,
     private val layout: SensorLayout = SensorLayout.Legacy,
+    private val sideSway: Double = 0.01,
+    private val leftShare: Double = 0.5,
+    private val shiftAmplitude: Double = 0.2,
+    private val shiftPeriodSeconds: Double = 4.0,
 ) {
     private val weightN get() = bodyWeightKg * 9.81
 
@@ -41,7 +50,8 @@ class GaitModel(
         when (mode) {
             SimMode.Lifted -> out.fill(0.0)
             SimMode.Walking -> walking(tSeconds, out)
-            SimMode.Standing -> standing(tSeconds, out)
+            SimMode.Standing -> standing(tSeconds, sideSway * sin(2 * PI * 0.1 * tSeconds), out)
+            SimMode.Shifting -> standing(tSeconds, shiftAmplitude * sin(2 * PI * tSeconds / shiftPeriodSeconds), out)
         }
         return out
     }
@@ -63,9 +73,10 @@ class GaitModel(
         split(out, fore, foreMedial, heel = heel, heelMedial = 0.45, mid = mid, midMedial = 0.3)
     }
 
-    private fun standing(t: Double, out: DoubleArray) {
-        val sideShift = 0.05 * sin(2 * PI * 0.1 * t)
-        val share = 0.5 + if (foot == Foot.LEFT) sideShift else -sideShift
+    /** Standing with [sideShift] of the weight moved to the left foot. */
+    private fun standing(t: Double, sideShift: Double, out: DoubleArray) {
+        val left = (leftShare + sideShift).coerceIn(0.0, 1.0)
+        val share = if (foot == Foot.LEFT) left else 1 - left
         val load = share * weightN
         val ap = 0.08 * sin(2 * PI * 0.25 * t) + 0.03 * sin(2 * PI * 0.7 * t + 1.0)
         val ml = 0.06 * sin(2 * PI * 0.33 * t + 0.5)

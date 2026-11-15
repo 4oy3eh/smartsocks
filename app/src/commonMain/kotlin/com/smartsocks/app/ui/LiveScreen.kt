@@ -146,10 +146,14 @@ private val LiveView.title: String
         LiveView.NUMBERS -> "Numbers"
     }
 
-/** L/R split with percentages and each foot's total load. Text changes only when the shown numbers change. */
+/**
+ * L/R split with percentages and each foot's total load. Text changes only when the shown numbers change. Marked
+ * "calibrated" while a shown foot's loads include a balance gain other than 1.
+ */
 @Composable
 internal fun BalancePanel(snapshot: State<LiveSnapshot>, modifier: Modifier = Modifier) {
     val leftPercent by remember { derivedStateOf { snapshot.value.balance?.let { (it.left * 100).roundToInt() } } }
+    val calibrated by remember { derivedStateOf { snapshot.value.balanceCalibrated } }
     val leftLoad by remember { derivedStateOf { snapshot.value.left.loadText() } }
     val rightLoad by remember { derivedStateOf { snapshot.value.right.loadText() } }
     val colors = MaterialTheme.colorScheme
@@ -159,12 +163,17 @@ internal fun BalancePanel(snapshot: State<LiveSnapshot>, modifier: Modifier = Mo
         Column(Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
             Row(verticalAlignment = Alignment.Bottom) {
                 Side("Left", leftPercent, Foot.LEFT, Modifier.weight(1f))
-                Text(
-                    "Balance",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colors.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 6.dp),
-                )
+                Column(Modifier.padding(bottom = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (calibrated) {
+                        Text(
+                            "Calibrated",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.primary,
+                            modifier = Modifier.padding(bottom = 2.dp),
+                        )
+                    }
+                    Text("Balance", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                }
                 Side("Right", leftPercent?.let { 100 - it }, Foot.RIGHT, Modifier.weight(1f))
             }
             Spacer(Modifier.height(10.dp))

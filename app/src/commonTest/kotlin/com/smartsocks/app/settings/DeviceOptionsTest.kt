@@ -5,6 +5,7 @@ import com.smartsocks.app.platform.SerialPortEntry
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.settings.AppSettings
 import com.smartsocks.core.settings.DeviceChoice
+import com.smartsocks.core.settings.identity
 import com.smartsocks.core.sim.SimMode
 import kotlin.test.Test
 import kotlin.test.assertEquals

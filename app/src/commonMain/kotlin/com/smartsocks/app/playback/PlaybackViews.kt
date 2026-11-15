@@ -124,7 +124,7 @@ class PlaybackViews(
 
     private fun view(foot: Foot, sample: PlaybackSample?, position: Double): FootView {
         val recorded = foot in timeline.feet
-        val state = sample?.toFootState()
+        val state = sample?.toFootState(timeline.gains.of(foot))
         val status = FootStatus(
             foot = foot,
             device = DeviceChoice.None,
@@ -180,8 +180,11 @@ class PlaybackViews(
     }
 }
 
-/** A recorded sample as the live views know it; shares are derived like the processor does. */
-internal fun PlaybackSample.toFootState(): FootState {
+/**
+ * A recorded sample as the live views know it; shares are derived like the processor does. [gain]: the balance gain
+ * the recorded loads include.
+ */
+internal fun PlaybackSample.toFootState(gain: Double = 1.0): FootState {
     val total = totalLoad
     val shares = DoubleArray(SENSOR_COUNT) { if (inContact && total > 0) loads[it] / total else 0.0 }
     return FootState(
@@ -194,5 +197,6 @@ internal fun PlaybackSample.toFootState(): FootState {
         cop = cop,
         rawCop = rawCop,
         baselineSource = baselineSource,
+        gain = gain,
     )
 }

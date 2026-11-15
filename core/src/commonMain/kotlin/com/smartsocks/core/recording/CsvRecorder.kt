@@ -1,5 +1,6 @@
 package com.smartsocks.core.recording
 
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.model.Point
@@ -12,7 +13,8 @@ import com.smartsocks.core.session.TimedPacket
 /**
  * Describes a recording in its header. [startTimeIso] comes from the caller: core has no wall clock. [feet]: the feet
  * recorded from the start; another foot may join later (see [CsvRecorder]). [layout]: the sensor layout the COP
- * columns were computed with (the session's).
+ * columns were computed with (the session's). [gains]: the balance gains the recorded loads include (the insoles'
+ * of both feet, also of a foot that only joins later).
  */
 data class RecordingMetadata(
     val startTimeIso: String,
@@ -21,13 +23,19 @@ data class RecordingMetadata(
     val feet: Set<Foot>,
     val note: String = "SmartSocks",
     val layout: SensorLayout = SensorLayout.Legacy,
+    val gains: FootGains = FootGains.NEUTRAL,
 )
 
 /** A foot that joined a recording after it started, at its first sample [tMillis] (the file's time axis). */
 data class CsvFootJoin(val foot: Foot, val tMillis: Double)
 
 internal const val CSV_FORMAT_KEY = "smartsocks-csv"
-internal const val CSV_FORMAT_VERSION = 2
+
+/**
+ * 3: the loads and `total_load` include the feet's balance gains, named by the `# gain=` header ([GAIN_KEY]); the
+ * columns are those of version 2, whose loads were plain conductance above baseline.
+ */
+internal const val CSV_FORMAT_VERSION = 3
 internal const val RAW_FORMAT_VERSION = 2
 internal const val RAW_FORMAT_KEY = "smartsocks-raw"
 internal const val RAW_COLUMNS = "t_ms,host_ms,foot,hex"
@@ -45,6 +53,39 @@ internal const val FOOT_JOINED_PREFIX = "# foot_joined,"
  * predate it keep as an unknown header entry.
  */
 internal const val LAYOUT_KEY = "sensor_layout"
+
+/**
+ * Header key of the balance gains the loads were multiplied by (`# gain=left:1.0712;right:0.9335`), see
+ * [FootGains]. Files without it (all before it) had none: 1.0 each.
+ */
+internal const val GAIN_KEY = "gain"
+
+internal fun encodeGains(gains: FootGains): String =
+    "left:${formatNumber(gains.left, 4)};right:${formatNumber(gains.right, 4)}"
+
+/**
+ * The balance gains a recording's loads include, from its header (`# key=value` lines as [CsvSessionReader] reads
+ * them): neutral for files from before the `# gain=` header or with a malformed one.
+ */
+fun recordedGains(header: Map<String, String>): FootGains =
+    header[GAIN_KEY]?.let { decodeGains(it) } ?: FootGains.NEUTRAL
+
+/** Null if [text] is not a valid gain entry; a missing foot counts as 1.0. */
+internal fun decodeGains(text: String): FootGains? {
+    var left = 1.0
+    var right = 1.0
+    for (part in text.trim().split(';')) {
+        val kv = part.split(':')
+        if (kv.size != 2) return null
+        val value = kv[1].trim().toDoubleOrNull()?.takeIf { it.isFinite() && it > 0.0 } ?: return null
+        when (kv[0].trim().lowercase()) {
+            "left" -> left = value
+            "right" -> right = value
+            else -> return null
+        }
+    }
+    return FootGains(left, right)
+}
 
 internal fun encodeLayout(layout: SensorLayout): String =
     layout.positions(Foot.LEFT).joinToString(";") { "${formatNumber(it.x, 4)}:${formatNumber(it.y, 4)}" }
@@ -74,7 +115,9 @@ internal val CSV_COLUMNS_V1: List<String> = CSV_COLUMNS.dropLast(1) + "calibrate
 
 /**
  * Writes [FootState]s as CSV: `#` header lines, a column line, then one row per sample. Resistance `r1..r6` is in
- * Ohms, loads in µS, time in ms since the first recorded sample. `baseline` is `none`, `auto` or `calibrated`.
+ * Ohms, loads in µS, time in ms since the first recorded sample. `baseline` is `none`, `auto` or `calibrated`. The
+ * loads (and `total_load`) include the feet's balance gains, written in the `# gain=` header ([GAIN_KEY]); the
+ * resistances do not.
  *
  * `cop_x`/`cop_y` (smoothed) and `raw_cop_x`/`raw_cop_y` are in the coordinates of the sensor layout written in the
  * `# sensor_layout=` header ([LAYOUT_KEY]): +y towards the toes, **+x to the person's right on both feet** (so +x is
@@ -109,6 +152,7 @@ class CsvRecorder(private val sink: RecordingSink, metadata: RecordingMetadata) 
         sink.writeLine("# feet=${metadata.feet.joinToString("+") { it.name }}")
         sink.writeLine("# note=${metadata.note.oneLine()}")
         sink.writeLine("# $LAYOUT_KEY=${encodeLayout(metadata.layout)}")
+        sink.writeLine("# $GAIN_KEY=${encodeGains(metadata.gains)}")
         sink.writeLine(CSV_COLUMNS.joinToString(","))
     }
 

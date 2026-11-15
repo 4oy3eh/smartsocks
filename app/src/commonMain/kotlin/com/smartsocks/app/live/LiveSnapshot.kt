@@ -57,6 +57,10 @@ class LiveSnapshot(
     val fullScaleLoad: Double,
 ) {
     fun foot(foot: Foot): FootView = if (foot == Foot.LEFT) left else right
+
+    /** A shown foot's loads include a balance gain (the L/R balance is calibrated). */
+    val balanceCalibrated: Boolean
+        get() = (left.state?.gain ?: 1.0) != 1.0 || (right.state?.gain ?: 1.0) != 1.0
 }
 
 /**

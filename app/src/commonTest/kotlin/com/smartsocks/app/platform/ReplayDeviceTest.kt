@@ -9,7 +9,6 @@ import com.smartsocks.app.recording.MemorySessionStore
 import com.smartsocks.app.recording.SessionSummary
 import com.smartsocks.app.settings.DeviceOptions
 import com.smartsocks.app.settings.deviceInUseByOtherFoot
-import com.smartsocks.app.settings.identity
 import com.smartsocks.app.settings.isSameDeviceAs
 import com.smartsocks.app.settings.withDeviceIfFree
 import com.smartsocks.core.model.Foot
@@ -21,6 +20,7 @@ import com.smartsocks.core.settings.DeviceChoice
 import com.smartsocks.core.settings.InMemorySettingsStore
 import com.smartsocks.core.settings.SettingsCodec
 import com.smartsocks.core.settings.SettingsRepository
+import com.smartsocks.core.settings.identity
 import com.smartsocks.core.sim.ReplaySockTransport
 import com.smartsocks.core.sim.SimulatedRecording
 import kotlinx.coroutines.ExperimentalCoroutinesApi

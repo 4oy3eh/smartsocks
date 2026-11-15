@@ -93,6 +93,7 @@ class TimedPacket(val foot: Foot, val timestampNanos: Long, val packet: RawPacke
  *
  * [baseline] is an explicit calibration to start from, e.g. the one of a previous session of the same insole at
  * the same [StreamSettings.range] (a baseline measured at another range does not apply: what saturates differs).
+ * [gain] is the insole's balance gain to start from ([FootProcessor.gain], see [setGain]).
  */
 class SockSession(
     val foot: Foot,
@@ -103,10 +104,19 @@ class SockSession(
     private val clockNanos: () -> Long = monotonicClock(),
     private val commandGapMillis: Long = 20,
     baseline: Baseline? = null,
+    gain: Double = 1.0,
 ) {
     val displayName: String get() = transport.displayName
 
-    private val processor = FootProcessor(foot, layout, processorSettings).apply { setBaseline(baseline) }
+    private val processor = FootProcessor(foot, layout, processorSettings).also { p ->
+        p.setBaseline(baseline)
+        p.gain = gain
+    }
+
+    private val _gain = MutableStateFlow(gain)
+
+    /** The balance gain in effect (or about to be, with the next packet); see [setGain]. */
+    val gain: StateFlow<Double> = _gain.asStateFlow()
 
     private val _baseline = MutableStateFlow(baseline)
 
@@ -226,6 +236,7 @@ class SockSession(
         processor.cancelCalibration()
         applyPendingProcessorSettings()
         applyPendingClear()
+        applyGain()
         windowPackets = 0
         packetsPerSecond = 0.0
         rateMismatch = false
@@ -371,6 +382,20 @@ class SockSession(
         pendingProcessorSettings.value = settings
     }
 
+    /**
+     * Sets the insole's balance gain ([FootProcessor.gain]): every load is multiplied by it from the next packet on
+     * (or when the next [run] starts). Keeps everything else. May be called from any thread, at any time.
+     */
+    fun setGain(gain: Double) {
+        require(gain.isFinite() && gain > 0.0) { "gain must be positive and finite, was $gain" }
+        _gain.value = gain
+    }
+
+    private fun applyGain() {
+        val g = _gain.value
+        if (g != processor.gain) processor.gain = g
+    }
+
     private fun applyPendingProcessorSettings() {
         if (pendingProcessorSettings.value != null) {
             pendingProcessorSettings.getAndUpdate { null }?.let(processor::updateSettings)
@@ -380,6 +405,7 @@ class SockSession(
     private fun onPacket(packet: RawPacket) {
         applyPendingProcessorSettings()
         applyPendingClear()
+        applyGain()
         if (calibrationRequest.value != null) {
             calibrationRequest.getAndUpdate { null }?.let {
                 processor.startCalibration(it)

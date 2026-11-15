@@ -31,6 +31,7 @@ import com.smartsocks.app.ui.AppScreen
 import com.smartsocks.app.ui.SettingsScreen
 import com.smartsocks.app.ui.SmartSocksApp
 import com.smartsocks.app.ui.SmartSocksTheme
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.analytics.ProcessorSettings
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.playback.SessionTimeline
@@ -107,6 +108,13 @@ private class Case(
     val player: PlayerSetup? = null,
     /** Adjusts the simulators' config per foot (e.g. a link that fails to open, to show reconnecting). */
     val simulator: ((Foot, SimConfig) -> SimConfig)? = null,
+    /** Starts the L/R balance calibration at this frame of the warm-up. */
+    val balanceAt: Int? = null,
+    /** Calibrates both feet's zero points at this frame of the warm-up. */
+    val zeroAt: Int? = null,
+
+    /** Switches both feet's simulators to this mode at this frame of the warm-up. */
+    val modeAt: Pair<Int, SimMode>? = null,
 )
 
 private class PreviewActions(blocked: Boolean) : DeviceActions {
@@ -161,6 +169,14 @@ private val replayBoth = AppSettings(
 /** The right sock never opens: it keeps reconnecting (attempt 2 waits 2 s, from about 1.6 s on). */
 private val rightFails: (Foot, SimConfig) -> SimConfig =
     { foot, config -> if (foot == Foot.RIGHT) config.copy(failToConnect = true) else config }
+
+/** The right insole reads 12 % more than the left one, as a pair of real insoles might. */
+private val rightSensitive: (Foot, SimConfig) -> SimConfig =
+    { foot, config -> if (foot == Foot.RIGHT) config.copy(sensitivity = 1.12) else config }
+
+private val bothLifted = DeviceChoice.Simulator(SimMode.Lifted).let { AppSettings(left = it, right = it) }
+
+private val bothStanding = DeviceChoice.Simulator(SimMode.Standing).let { AppSettings(left = it, right = it) }
 
 private val cases = listOf(
     // Recording on the live screen.
@@ -444,6 +460,92 @@ private val cases = listOf(
     Case("live-reconnecting-phone-dark", 360, 780, 2.5f, AppTheme.DARK, simulator = rightFails),
     Case("settings-reconnecting-desktop-light", 1120, 760, 1f, AppTheme.LIGHT, Screen.SETTINGS, simulator = rightFails),
     Case("settings-reconnecting-phone-dark", 360, 780, 2.5f, AppTheme.DARK, Screen.SETTINGS, simulator = rightFails),
+    // The L/R balance calibration: the zero points first (feet lifted), then shifting the weight (or standing still,
+    // which is refused) while it measures; the live balance bar with stored gains.
+    Case(
+        "balance-idle",
+        1120,
+        1100,
+        1f,
+        AppTheme.LIGHT,
+        Screen.SETTINGS,
+        settings = bothStanding,
+        simulator = rightSensitive,
+    ),
+    Case(
+        "balance-measuring",
+        1120,
+        1100,
+        1f,
+        AppTheme.DARK,
+        Screen.SETTINGS,
+        settings = bothLifted,
+        simulator = rightSensitive,
+        warmupFrames = 420,
+        zeroAt = 20,
+        modeAt = 180 to SimMode.Shifting,
+        balanceAt = 230,
+    ),
+    Case(
+        "balance-done",
+        1120,
+        1100,
+        1f,
+        AppTheme.LIGHT,
+        Screen.SETTINGS,
+        settings = bothLifted,
+        simulator = rightSensitive,
+        warmupFrames = 1000,
+        zeroAt = 20,
+        modeAt = 180 to SimMode.Shifting,
+        balanceAt = 230,
+    ),
+    Case(
+        "balance-done-phone",
+        360,
+        2100,
+        2.5f,
+        AppTheme.DARK,
+        Screen.SETTINGS,
+        settings = bothLifted,
+        simulator = rightSensitive,
+        warmupFrames = 1000,
+        zeroAt = 20,
+        modeAt = 180 to SimMode.Shifting,
+        balanceAt = 230,
+    ),
+    Case(
+        "balance-failed",
+        1120,
+        1100,
+        1f,
+        AppTheme.DARK,
+        Screen.SETTINGS,
+        settings = bothLifted,
+        simulator = rightSensitive,
+        warmupFrames = 1000,
+        zeroAt = 20,
+        modeAt = 180 to SimMode.Standing,
+        balanceAt = 230,
+    ),
+    Case(
+        "balance-live",
+        1120,
+        760,
+        1f,
+        AppTheme.LIGHT,
+        settings = bothStanding.withCurrentGains(FootGains.forRatio(1.12)),
+        simulator = rightSensitive,
+    ),
+    Case(
+        "balance-live-uncalibrated",
+        1120,
+        760,
+        1f,
+        AppTheme.DARK,
+        settings = bothStanding,
+        simulator = rightSensitive,
+    ),
     // Settings.
     Case("settings-desktop-dark", 1120, 760, 1f, AppTheme.DARK, Screen.SETTINGS),
     Case(
@@ -682,6 +784,19 @@ fun main(args: Array<String>) {
             repeat(case.warmupFrames) { frame ->
                 if (case.record && frame == case.warmupFrames / 3) recorder.start()
                 if (case.record && frame == case.warmupFrames * 2 / 3) recorder.mark()
+                if (frame == case.balanceAt) controller.calibrateBalance()
+                if (frame == case.zeroAt) {
+                    controller.left.calibrate()
+                    controller.right.calibrate()
+                }
+                case.modeAt?.takeIf { it.first == frame }?.let { (_, mode) ->
+                    settings.update { s ->
+                        Foot.entries.fold(s) { acc, foot ->
+                            val d = acc.device(foot)
+                            if (d is DeviceChoice.Simulator) acc.withDevice(foot, d.copy(mode = mode)) else acc
+                        }
+                    }
+                }
                 val t0 = System.nanoTime()
                 scene.render(t0 - start)
                 renderNanos += System.nanoTime() - t0

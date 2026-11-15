@@ -1,5 +1,6 @@
 package com.smartsocks.core.settings
 
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.analytics.ProcessorSettings
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.protocol.MeasurementRange
@@ -15,6 +16,10 @@ import com.smartsocks.core.sim.SimMode
  * Decoding never throws: unknown keys are ignored and every missing or invalid value falls back to its default on
  * its own. A file without a valid version line is not ours and decodes to the defaults; a newer version is read
  * best effort (keys are only ever added).
+ *
+ * Balance gains are one line per pair of insoles, `insoleGain.<n>=<left identity>|<right identity>|<left>|<right>`,
+ * `n` from 0 in the order of [AppSettings.balanceGains] (oldest first); `%` and `|` in an identity are written as
+ * `%25` and `%7C`. An entry that does not parse, or with a gain outside [GAIN_RANGE], is skipped on its own.
  */
 object SettingsCodec {
     const val VERSION = 1
@@ -76,6 +81,10 @@ object SettingsCodec {
         put("recording.saveRaw", settings.recording.saveRaw)
         put("autoConnect", settings.autoConnect)
         put("autoReconnect", settings.autoReconnect)
+        for ((n, entry) in settings.balanceGains.entries.withIndex()) {
+            val (pair, gains) = entry
+            put("$GAIN_PREFIX$n", "${encodeId(pair.left)}|${encodeId(pair.right)}|${gains.left}|${gains.right}")
+        }
         return out.toString()
     }
 
@@ -115,7 +124,29 @@ object SettingsCodec {
             recording = RecordingSettings(saveRaw = boolean("recording.saveRaw", defaults.recording.saveRaw)),
             autoConnect = boolean("autoConnect", defaults.autoConnect),
             autoReconnect = boolean("autoReconnect", defaults.autoReconnect),
+            balanceGains = balanceGains(),
         )
+
+        private fun balanceGains(): Map<InsolePair, FootGains> {
+            val entries = values.entries.mapNotNull { (key, value) ->
+                val n = key.takeIf { it.startsWith(GAIN_PREFIX) }?.removePrefix(GAIN_PREFIX)?.toIntOrNull()
+                n?.let { it to value }
+            }.sortedBy { it.first }
+            val gains = LinkedHashMap<InsolePair, FootGains>()
+            for ((_, value) in entries) {
+                val parts = value.split('|')
+                if (parts.size != 4 || parts[0].isBlank() || parts[1].isBlank()) continue
+                val l = parts[2].trim().toDoubleOrNull()?.takeIf { it in GAIN_RANGE } ?: continue
+                val r = parts[3].trim().toDoubleOrNull()?.takeIf { it in GAIN_RANGE } ?: continue
+                gains[InsolePair(decodeId(parts[0]), decodeId(parts[1]))] = FootGains(l, r)
+            }
+            // As [AppSettings.withCurrentGains] keeps it: the newest ones.
+            return if (gains.size <= AppSettings.MAX_BALANCE_PAIRS) {
+                gains
+            } else {
+                gains.entries.toList().takeLast(AppSettings.MAX_BALANCE_PAIRS).associate { it.key to it.value }
+            }
+        }
 
         private fun device(foot: Foot): DeviceChoice {
             val p = foot.prefix
@@ -240,6 +271,15 @@ object SettingsCodec {
     }
 
     private val Foot.prefix: String get() = name.lowercase()
+
+    private fun encodeId(id: String) = id.replace("%", "%25").replace("|", "%7C")
+
+    private fun decodeId(text: String) = text.replace("%7C", "|", ignoreCase = true).replace("%25", "%")
+
+    /** Stored balance gains outside it are taken as damage and dropped (a calibration yields 1/√2 … √2). */
+    val GAIN_RANGE = 0.25..4.0
+
+    private const val GAIN_PREFIX = "insoleGain."
 
     private const val NONE = "none"
     private const val SIMULATOR = "simulator"

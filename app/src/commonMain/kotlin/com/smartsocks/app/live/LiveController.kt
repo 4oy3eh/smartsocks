@@ -4,9 +4,12 @@ import com.smartsocks.app.platform.DeviceFactory
 import com.smartsocks.app.platform.DeviceResult
 import com.smartsocks.app.platform.UnavailableReason
 import com.smartsocks.app.settings.deviceInUseByOtherFoot
-import com.smartsocks.app.settings.identity
 import com.smartsocks.core.analytics.BalanceCalculator
+import com.smartsocks.core.analytics.BalanceCalibrator
+import com.smartsocks.core.analytics.BalanceResult
 import com.smartsocks.core.analytics.Baseline
+import com.smartsocks.core.analytics.BaselineSource
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.analytics.FootState
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.protocol.MeasurementRange
@@ -16,7 +19,9 @@ import com.smartsocks.core.session.StreamSettings
 import com.smartsocks.core.session.StreamStats
 import com.smartsocks.core.settings.AppSettings
 import com.smartsocks.core.settings.DeviceChoice
+import com.smartsocks.core.settings.InsolePair
 import com.smartsocks.core.settings.SettingsRepository
+import com.smartsocks.core.settings.identity
 import com.smartsocks.core.sim.SimMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -28,6 +33,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -36,6 +42,8 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -114,6 +122,41 @@ sealed interface CalibrationState {
     data class Failed(val message: String) : CalibrationState
 }
 
+/** The L/R balance calibration, as the settings show it; see [LiveController.calibrateBalance]. */
+sealed interface BalanceCalibrationState {
+    data object Idle : BalanceCalibrationState
+
+    /** Both feet are being measured; [progress] 0..1 in steps of 2 %. */
+    data class Measuring(val progress: Double) : BalanceCalibrationState
+
+    /** [result]'s gains are stored and in effect. */
+    data class Done(val result: BalanceResult.Calibrated) : BalanceCalibrationState
+
+    data class Failed(val message: String) : BalanceCalibrationState
+}
+
+/** Where the balance gains in effect come from. */
+enum class GainSource {
+    /** Not calibrated: 1.0 each. */
+    NONE,
+
+    /** A balance calibration of the current pair of insoles. */
+    CALIBRATED,
+
+    /** A replayed recording's own (its `# gain=` header), the replayed pair being not calibrated. */
+    RECORDING,
+}
+
+/** The balance gains in effect for the feet's current pair, see [LiveController.gains]. */
+data class GainsInEffect(val gains: FootGains = FootGains.NEUTRAL, val source: GainSource = GainSource.NONE)
+
+/** Stored gains of the pair, else the replays' recorded ones (if any differs from 1), else neutral. */
+internal fun gainsOf(settings: AppSettings, recordedLeft: Double?, recordedRight: Double?): GainsInEffect {
+    settings.currentGains?.let { return GainsInEffect(it, GainSource.CALIBRATED) }
+    val recorded = FootGains(recordedLeft ?: 1.0, recordedRight ?: 1.0)
+    return if (recorded.isNeutral) GainsInEffect() else GainsInEffect(recorded, GainSource.RECORDING)
+}
+
 data class FootStatus(
     val foot: Foot,
     val device: DeviceChoice,
@@ -155,6 +198,10 @@ data class FootStatus(
  *
  * An explicit calibration survives a session rebuild that keeps the sock (by its identity: port or address, not
  * its display name) and the measurement range (e.g. a new sample rate).
+ *
+ * Each session applies its foot's balance gain from [gains]: the ones stored for the current pair of insoles
+ * ([AppSettings.balanceGains]), else a replayed recording's own, else 1.0; also when they change while streaming (a
+ * calibration, a reset, the other foot's device changed). [calibrateBalance] measures and stores them.
  *
  * A device that streams at fixed settings ([DeviceResult.Ready.stream]: a replay, at the recorded rate and range) is
  * read with those instead of [AppSettings.stream]; one that does not reconnect ([DeviceResult.Ready.reconnects]: a
@@ -203,12 +250,172 @@ class LiveController(
     /** Now, on the clock the samples are stamped from (their [FootState.timestampNanos]). */
     fun nowNanos(): Long = clockNanos()
 
+    /** The balance state together with the token of the measurement allowed to change it, see [updateBalance]. */
+    private val taggedBalance = MutableStateFlow(TaggedBalance(null, BalanceCalibrationState.Idle))
+
+    private val _balanceCalibration = MutableStateFlow<BalanceCalibrationState>(BalanceCalibrationState.Idle)
+
+    /** The last [calibrateBalance] or [resetBalance] and how it went. */
+    val balanceCalibration: StateFlow<BalanceCalibrationState> = _balanceCalibration.asStateFlow()
+
+    private val gainsFlow = combine(settings.settings, left.recordedGain, right.recordedGain, ::gainsOf)
+        .distinctUntilChanged()
+
+    /** The balance gains for the feet's current pair of insoles (in effect while they stream), and where from. */
+    val gains: StateFlow<GainsInEffect> = gainsFlow.stateIn(this.scope, SharingStarted.Eagerly, currentGains())
+
+    @Volatile
+    private var balanceJob: Job? = null
+
     init {
         this.scope.launch {
             settings.awaitLoaded()
             val auto = settings.settings.value.autoConnect
             left.start(auto)
             right.start(auto)
+        }
+        // "Done" only while its gains are the ones in effect: a reset, another pair or a newer calibration ends it.
+        this.scope.launch {
+            gainsFlow.collect {
+                // The newest, not the emitted value: a stale emission must not end a calibration that just finished.
+                val current = currentGains()
+                updateBalance {
+                    val state = it.state
+                    val stale = state is BalanceCalibrationState.Done &&
+                        (current.source != GainSource.CALIBRATED || state.result.gains != current.gains)
+                    if (stale) TaggedBalance(null, BalanceCalibrationState.Idle) else it
+                }
+            }
+        }
+    }
+
+    private fun currentGains(): GainsInEffect =
+        gainsOf(settings.settings.value, left.recordedGain.value, right.recordedGain.value)
+
+    /**
+     * Starts the L/R balance calibration, by weight shifting: both feet stream, stand on the ground and have a zero
+     * point; the person then slowly shifts the weight from one foot to the other and back for [BALANCE_SECONDS]. Then
+     * [BalanceCalibrator] decides (see [com.smartsocks.core.analytics.BalanceGain.evaluate]: it measures the insoles'
+     * sensitivity ratio whatever the person's average stance); on success the gains are stored for the current pair
+     * of insoles and applied at once. Refused (false, and [balanceCalibration] says why) unless both feet stream, are
+     * in contact and have a zero point. Progress and outcome go to [balanceCalibration]; a disconnect, a device change
+     * or no data for [BALANCE_TIMEOUT_FACTOR] times the duration cut it short (the previous gains stay). While a
+     * recording runs the gains cannot change (its file names them): the measurement then ends as failed.
+     */
+    fun calibrateBalance(): Boolean {
+        val l = left.session.value
+        val r = right.session.value
+        if (l == null || r == null || l.connection.value != ConnectionState.Streaming ||
+            r.connection.value != ConnectionState.Streaming
+        ) {
+            return refuseBalance(BOTH_FEET_STREAMING)
+        }
+        val latest = listOf(Foot.LEFT to l.latest.value, Foot.RIGHT to r.latest.value)
+        val off = latest.filter { it.second?.inContact != true }.map { it.first }
+        if (off.isNotEmpty()) {
+            val which = if (off.size == 2) "neither foot is" else "the ${off.single().name.lowercase()} foot is not"
+            return refuseBalance("Stand on both feet first: $which on the ground")
+        }
+        if (latest.any { it.second?.baselineSource == BaselineSource.NONE }) {
+            return refuseBalance(BalanceCalibrator.NO_BASELINE_MESSAGE)
+        }
+        // The pair measured (a simulator's mode or a replay's loop setting may change: the insoles stay).
+        val pair = settings.settings.value.currentPair
+        val token = Any()
+        balanceJob?.cancel()
+        updateBalance { TaggedBalance(token, BalanceCalibrationState.Measuring(0.0)) }
+        val durationNanos = (BALANCE_SECONDS * 1e9).toLong()
+        val calibrator = BalanceCalibrator(durationNanos)
+        balanceJob = scope.launch {
+            val broken = combine(left.session, right.session, l.connection, r.connection) { sl, sr, cl, cr ->
+                when {
+                    sl !== l || sr !== r -> "The connection was restarted during the measurement"
+
+                    cl != ConnectionState.Streaming || cr != ConnectionState.Streaming ->
+                        "A foot was disconnected during the measurement"
+
+                    else -> null
+                }
+            }.filterNotNull().map { BalanceCalibrationState.Failed(it) }
+            var outcome: BalanceCalibrationState? = null
+            val measured = merge(l.states, r.states).map { state ->
+                outcome ?: if (calibrator.add(state)) {
+                    finishBalance(calibrator.result(), pair, token).also { outcome = it }
+                } else {
+                    BalanceCalibrationState.Measuring(quantize(calibrator.progress))
+                }
+            }
+            val ended = withTimeoutOrNull(durationNanos / 1_000_000 * BALANCE_TIMEOUT_FACTOR) {
+                merge(broken, measured)
+                    .distinctUntilChanged()
+                    .transformWhile {
+                        emit(it)
+                        it is BalanceCalibrationState.Measuring
+                    }
+                    .collect { state ->
+                        updateBalance { if (it.token === token) TaggedBalance(token, state) else it }
+                    }
+            }
+            if (ended == null) {
+                updateBalance {
+                    if (it.token === token) TaggedBalance(token, BalanceCalibrationState.Failed(TIMED_OUT)) else it
+                }
+            }
+        }
+        return true
+    }
+
+    /**
+     * Removes the balance calibration of the current pair of insoles (and stops a measurement): back to 1.0 each, or
+     * to a replayed recording's gains.
+     */
+    fun resetBalance() {
+        // The token first: from here on a measurement that is just finishing no longer stores its gains.
+        updateBalance { TaggedBalance(null, BalanceCalibrationState.Idle) }
+        balanceJob?.cancel()
+        settings.update { it.withCurrentGains(null) }
+    }
+
+    /**
+     * Stores a successful result for [pair] (the insoles when it started), atomically only while the measurement
+     * [token] is still current (a [resetBalance] since then wins); returns the outcome to show.
+     */
+    private fun finishBalance(result: BalanceResult, pair: InsolePair, token: Any): BalanceCalibrationState {
+        if (result is BalanceResult.Rejected) return BalanceCalibrationState.Failed(result.message)
+        val calibrated = result as BalanceResult.Calibrated
+        settings.update { s ->
+            if (taggedBalance.value.token !== token ||
+                s.currentPair != pair
+            ) {
+                s
+            } else {
+                s.withCurrentGains(calibrated.gains)
+            }
+        }
+        val now = settings.settings.value
+        return when {
+            now.currentPair != pair -> BalanceCalibrationState.Failed("The devices were changed during the measurement")
+
+            // Vetoed by the settings' guard: a recording runs.
+            now.currentGains != calibrated.gains -> BalanceCalibrationState.Failed(BALANCE_LOCKED)
+
+            else -> BalanceCalibrationState.Done(calibrated)
+        }
+    }
+
+    private fun refuseBalance(message: String): Boolean {
+        balanceJob?.cancel()
+        updateBalance { TaggedBalance(null, BalanceCalibrationState.Failed(message)) }
+        return false
+    }
+
+    /** Like [FootLink.updateCalibration]: the last writer always leaves the newest state. */
+    private fun updateBalance(transform: (TaggedBalance) -> TaggedBalance) {
+        taggedBalance.update(transform)
+        while (true) {
+            val current = taggedBalance.value
+            _balanceCalibration.value = current.state
+            if (taggedBalance.value === current) return
         }
     }
 
@@ -285,6 +492,9 @@ class LiveController(
 
         /** Bumped by [recheck]: part of the session's config, so it rebuilds the session. */
         private val retry = MutableStateFlow(0)
+
+        /** The current device's recorded balance gain ([DeviceResult.Ready.recordedGain]: a replay's), else null. */
+        internal val recordedGain = MutableStateFlow<Double?>(null)
 
         /**
          * The calibration state together with the token of the watcher allowed to change it: changed only with
@@ -473,6 +683,7 @@ class LiveController(
         private suspend fun unusable(config: FootConfig, device: DeviceChoice, state: LinkState) {
             usable = false
             _session.value = null
+            recordedGain.value = null
             _calibrated.value = false
             resetStaleCalibration(inEffect = false)
             val keep = state is LinkState.Unavailable && state.reason.recoverable
@@ -519,6 +730,7 @@ class LiveController(
             // A device that streams at fixed settings (a replay: as recorded) is read with those.
             val stream = ready.stream ?: config.stream
             val baselineKey = BaselineKey(config.device.identity, stream.range)
+            recordedGain.value = ready.recordedGain
             val session = SockSession(
                 foot,
                 transport,
@@ -527,6 +739,7 @@ class LiveController(
                 processorSettings = current.processor,
                 clockNanos = clockNanos,
                 baseline = carried?.takeIf { it.key == baselineKey }?.baseline,
+                gain = currentGains().gains.of(foot),
             )
             usable = true
             _session.value = session
@@ -550,6 +763,10 @@ class LiveController(
                         settings.settings.map { it.processor }.distinctUntilChanged().collect {
                             if (it != session.processorSettings.value) session.updateProcessorSettings(it)
                         }
+                    }
+                    // The insole's balance gain, also when it is calibrated or reset while streaming.
+                    launch {
+                        gainsFlow.map { it.gains.of(foot) }.distinctUntilChanged().collect { session.setGain(it) }
                     }
                     val replay = ready.replay
                     if (replay != null) {
@@ -711,6 +928,9 @@ class LiveController(
     /** A calibration state and the token of the calibration watcher that may change it (null: none may). */
     private class TaggedCalibration(val token: Any?, val state: CalibrationState)
 
+    /** The same for the balance calibration. */
+    private class TaggedBalance(val token: Any?, val state: BalanceCalibrationState)
+
     private class CarriedBaseline(val key: BaselineKey, val baseline: Baseline)
 
     /**
@@ -744,6 +964,18 @@ class LiveController(
         const val CALIBRATION_SECONDS = 2.0
 
         const val NOT_STREAMING = "Connect the foot first: the zero point is measured from the live stream"
+
+        /** How long [calibrateBalance] measures the even stance. */
+        const val BALANCE_SECONDS = 10.0
+
+        /** A balance measurement that has not ended after this many times [BALANCE_SECONDS] fails. */
+        const val BALANCE_TIMEOUT_FACTOR = 3
+
+        const val TIMED_OUT = "The measurement did not finish: a foot sent no data for too long"
+
+        const val BOTH_FEET_STREAMING = "Connect both feet first: the balance is measured from both live streams"
+
+        const val BALANCE_LOCKED = "Stop the recording to change the balance calibration"
 
         private fun quantize(progress: Double): Double = (progress * 50).toInt().coerceIn(0, 50) / 50.0
 

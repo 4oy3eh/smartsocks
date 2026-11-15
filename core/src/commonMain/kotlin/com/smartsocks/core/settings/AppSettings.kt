@@ -1,5 +1,6 @@
 package com.smartsocks.core.settings
 
+import com.smartsocks.core.analytics.FootGains
 import com.smartsocks.core.analytics.ProcessorSettings
 import com.smartsocks.core.model.Foot
 import com.smartsocks.core.protocol.SENSOR_COUNT
@@ -24,6 +25,36 @@ sealed interface DeviceChoice {
      * foot may play either foot's packets); [loop]: start over at the end instead of disconnecting there.
      */
     data class Replay(val sessionId: String, val foot: Foot, val loop: Boolean = true) : DeviceChoice
+}
+
+/**
+ * Which physical insole this is, for remembering things about it (its calibrations): the port or address in upper
+ * case, never the display name; for the simulator only what changes its readings (preloaded or not); for a replay
+ * the recording and the foot it plays.
+ */
+val DeviceChoice.identity: String
+    get() = when (this) {
+        DeviceChoice.None -> "none"
+        is DeviceChoice.Simulator -> "simulator:$preloaded"
+        is DeviceChoice.SerialPort -> "serial:${portName.uppercase()}"
+        is DeviceChoice.Bluetooth -> "bluetooth:${address.uppercase()}"
+        is DeviceChoice.Replay -> "replay:${foot.name}:$sessionId"
+    }
+
+/**
+ * A pair of insoles as worn: the [identity] of the left foot's device and of the right one's. Balance gains only
+ * mean something for the pair they were measured on: replacing one insole or swapping the sides is another pair.
+ */
+data class InsolePair(val left: String, val right: String) {
+    /** One of the two is replay [sessionId]'s (either foot of it). */
+    fun replays(sessionId: String): Boolean = left.isReplayOf(sessionId) || right.isReplayOf(sessionId)
+
+    companion object {
+        fun of(left: DeviceChoice, right: DeviceChoice) = InsolePair(left.identity, right.identity)
+
+        private fun String.isReplayOf(sessionId: String) =
+            Foot.entries.any { this == DeviceChoice.Replay(sessionId, it).identity }
+    }
 }
 
 enum class AppTheme { SYSTEM, LIGHT, DARK }
@@ -120,9 +151,50 @@ data class AppSettings(
      * between (see `ReconnectBackoff` in the app). Off: such a foot stays disconnected until connected again.
      */
     val autoReconnect: Boolean = true,
+    /**
+     * The balance gains of every pair of insoles calibrated so far (see [FootGains], `FootProcessor.gain`), oldest
+     * calibration first, at most [MAX_BALANCE_PAIRS]. A pair with an entry is calibrated (also with neutral gains:
+     * then it needed no correction); one without is not.
+     */
+    val balanceGains: Map<InsolePair, FootGains> = emptyMap(),
 ) {
+
     fun device(foot: Foot): DeviceChoice = if (foot == Foot.LEFT) left else right
 
     fun withDevice(foot: Foot, choice: DeviceChoice): AppSettings =
         if (foot == Foot.LEFT) copy(left = choice) else copy(right = choice)
+
+    /** The feet's current pair of insoles. */
+    val currentPair: InsolePair get() = InsolePair.of(left, right)
+
+    /** The balance gains stored for the current pair; null if it is not calibrated. */
+    val currentGains: FootGains? get() = balanceGains[currentPair]
+
+    /**
+     * Stores [gains] for the current pair (null removes them), as its newest entry; beyond [MAX_BALANCE_PAIRS] the
+     * oldest calibrations are dropped.
+     */
+    fun withCurrentGains(gains: FootGains?): AppSettings {
+        val pair = currentPair
+        val rest = balanceGains - pair
+        if (gains == null) return if (pair in balanceGains) copy(balanceGains = rest) else this
+        val kept = rest.entries.toList().takeLast(MAX_BALANCE_PAIRS - 1)
+        return copy(
+            balanceGains = LinkedHashMap<InsolePair, FootGains>().apply {
+                for ((k, v) in kept) put(k, v)
+                put(pair, gains)
+            },
+        )
+    }
+
+    /** Without the gains of pairs with a replay of recording [sessionId] (it was deleted). */
+    fun withoutReplayGains(sessionId: String): AppSettings {
+        if (balanceGains.keys.none { it.replays(sessionId) }) return this
+        return copy(balanceGains = balanceGains.filterKeys { !it.replays(sessionId) })
+    }
+
+    companion object {
+        /** How many calibrated pairs are remembered. */
+        const val MAX_BALANCE_PAIRS = 32
+    }
 }

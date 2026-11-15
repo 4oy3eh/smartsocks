@@ -321,9 +321,10 @@ internal fun LinkStatusLine(status: FootStatus, modifier: Modifier = Modifier) {
 
 private val SimMode.title: String
     get() = when (this) {
-        SimMode.Walking -> "Walking"
-        SimMode.Standing -> "Standing"
-        SimMode.Lifted -> "Lifted"
+        SimMode.Walking -> "Walk"
+        SimMode.Standing -> "Stand"
+        SimMode.Lifted -> "Lift"
+        SimMode.Shifting -> "Shift"
     }
 
 @Composable
@@ -345,6 +346,7 @@ private fun SimulatorOptions(
             SimMode.Walking -> "A steady walk: heel strike to toe-off, feet half a stride apart."
             SimMode.Standing -> "Quiet standing with slow sway."
             SimMode.Lifted -> "The foot in the air, as for a calibration."
+            SimMode.Shifting -> "Shifting the weight from foot to foot, as for the balance calibration."
         },
         modifier = Modifier.padding(top = 6.dp, bottom = 10.dp),
     )

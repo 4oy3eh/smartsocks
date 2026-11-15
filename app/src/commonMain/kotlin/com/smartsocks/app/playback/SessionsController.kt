@@ -150,7 +150,10 @@ class SessionsController(
     fun delete(session: StoredSession) {
         if (refuseWhileRecording(session)) return
         if (_player.value?.session?.id == session.id) closePlayer()
-        fileOperation("Cannot delete", before = { fileUsers.release(session.id) }) { store.delete(session.id) }
+        fileOperation("Cannot delete", before = { fileUsers.release(session.id) }) {
+            store.delete(session.id)
+            fileUsers.deleted(session.id)
+        }
     }
 
     /** Null when done, else why [newName] cannot be used (shown in the rename dialog). */

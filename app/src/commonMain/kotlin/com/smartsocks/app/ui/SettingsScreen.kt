@@ -88,8 +88,12 @@ fun SettingsScreen(
                     FootDeviceCard(foot, settings, onChange, controller, catalog, lists, actions, m, locked = recording)
                 }
 
-                SectionHeader("Calibration", "Sets each insole's zero point, measured with the foot unloaded.")
+                SectionHeader(
+                    "Calibration",
+                    "Sets each insole's zero point, measured with the foot unloaded, and evens out the two insoles.",
+                )
                 BothFeet(wide, gap) { foot, m -> FootCalibrationCard(foot, controller, m) }
+                BalanceCalibrationCard(controller, recording, Modifier.padding(top = gap))
 
                 if (wide) {
                     Row(horizontalArrangement = Arrangement.spacedBy(gap)) {

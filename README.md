@@ -12,8 +12,9 @@ the socks, so you can try everything without the hardware.
 
 ## Background
 
-The sock system was built as a bachelor's thesis project and used in a usability study with athletes. In that study,
-athletes performed single-leg squats and used the app's COP feedback to correct their foot pressure position:
+The original app was written as a bachelor's thesis (not published online). The app has been used in research on
+the sock system, for example in this usability study, where athletes performed single-leg squats and used the app's
+COP feedback to correct their foot pressure position:
 
 > G. Semjonova, A. Davidovica, N. Kozlovskis, A. Okss, A. Katashevs.
 > **Smart Textile Sock System for Athletes' Self-Correction during Functional Tasks: Formative Usability Evaluation.**
@@ -107,9 +108,9 @@ The app is complete on the simulator and on replayed data. It has not yet been t
 Some protocol details still have to be confirmed on the hardware: the start command order, a few unknown packet
 bytes and which Bluetooth connection method works.
 
-## Citation
+## Related publication
 
-If you use this work, please cite the study:
+The usability study mentioned above, which used the original app:
 
 ```bibtex
 @article{semjonova2022smartsocks,
